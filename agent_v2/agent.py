@@ -5,6 +5,7 @@ import re
 import logging
 from typing import Dict, Any, List, Optional, Callable
 import locale
+import time
 
 # ---------- 环境与日志配置 ----------
 try:
@@ -31,92 +32,85 @@ client = OpenAI(
     base_url="https://api.deepseek.com/v1",
 )
 
-from .tools import calculator, web_search
+from .tools import calculator, web_search, get_tool_stats, TOOLS_SCHEMA, _TOOL_MAX_FAILURES
 
 
-# ---------- 工具注册与装饰器 ----------
+
+# ---------- Circuit Breaker ----------
+class CircuitBreaker:
+    def __init__(self, max_failures=_TOOL_MAX_FAILURES):
+        self._failures: Dict[str, int] = {}
+        self._max = max_failures
+    def is_open(self, name: str) -> bool:
+        return self._failures.get(name, 0) >= self._max
+    def record(self, name: str) -> None:
+        self._failures[name] = self._failures.get(name, 0) + 1
+    def reset(self, name: str) -> None:
+        self._failures.pop(name, None)
+
+circuit_breaker = CircuitBreaker()
+
+# ---------- Tool Registry ----------
 class ToolRegistry:
-    """工具注册表，管理所有可用工具"""
     def __init__(self):
         self._tools: Dict[str, Dict] = {}
-
-    def register(self, name: str, description: str, parameters: Dict[str, str]):
-        """装饰器：注册工具"""
+        self._stats: Dict[str, Dict[str, int]] = {"calls": {}, "success": {}, "failure": {}}
+    def register(self, name: str, description: str, parameters: Dict[str, Any]):
         def decorator(func: Callable):
-            self._tools[name] = {
-                "name": name,
-                "description": description,
-                "parameters": parameters,
-                "function": func,
-            }
+            self._tools[name] = {"name": name, "description": description, "parameters": parameters, "function": func}
             return func
         return decorator
-
     def get_all(self) -> List[Dict]:
-        """返回所有工具描述（用于提示词）"""
-        return [
-            {
-                "name": t["name"],
-                "description": t["description"],
-                "parameters": t["parameters"],
-            }
-            for t in self._tools.values()
-        ]
-
+        return [{"name": t["name"], "description": t["description"], "parameters": t["parameters"]} for t in self._tools.values()]
     def execute(self, name: str, args: Dict[str, Any]) -> str:
-        """执行工具，返回观察结果字符串"""
+        if circuit_breaker.is_open(name):
+            return f"Circuit open for tool {name}: too many consecutive failures. Aborting."
         tool = self._tools.get(name)
         if not tool:
-            return f"未知工具: {name}"
+            return f"Unknown tool: {name}"
+        self._stats["calls"][name] = self._stats["calls"].get(name, 0) + 1
         try:
             result = tool["function"](**args)
+            self._stats["success"][name] = self._stats["success"].get(name, 0) + 1
+            circuit_breaker.reset(name)
             return str(result)
-        except TypeError as e:
-            return f"参数错误: {e}"
         except Exception as e:
-            logger.exception(f"工具 {name} 执行异常")
-            return f"工具执行异常: {e}"
-
-    def get_tools_description(self) -> str:
-        """生成工具描述文本"""
-        lines = []
+            self._stats["failure"][name] = self._stats["failure"].get(name, 0) + 1
+            circuit_breaker.record(name)
+            logger.exception(f"Tool {name} execution failed")
+            return f"Tool error [{name}]: {e}"
+    def get_tools_json_schema(self) -> List[Dict]:
+        return TOOLS_SCHEMA
+    def get_tools_text_description(self) -> str:
+        result = []
         for t in self._tools.values():
             params = ", ".join(f"{k}: {v}" for k, v in t["parameters"].items())
-            lines.append(f"- {t['name']}({params}): {t['description']}")
-        return chr(10).join(lines)
+            result.append(f"- {t[chr(110)+chr(97)+chr(109)+chr(101)]}({params}): {t[chr(100)+chr(101)+chr(115)+chr(99)+chr(114)+chr(105)+chr(112)+chr(116)+chr(105)+chr(111)+chr(110)]}")
+        return chr(10).join(result)
 
-
-# 创建全局注册表
 registry = ToolRegistry()
+registry.register(name="calculator", description=TOOLS_SCHEMA[0]["description"], parameters=TOOLS_SCHEMA[0]["parameters"])(calculator)
+registry.register(name="web_search", description=TOOLS_SCHEMA[1]["description"], parameters=TOOLS_SCHEMA[1]["parameters"])(web_search)
 
-# 注册内置工具
-registry.register(
-    name="calculator",
-    description="安全计算数学表达式，例如 '2+3*4'",
-    parameters={"expression": "str"},
-)(calculator)
+# ---------- System Prompt ----------
+SYSTEM_PROMPT_TEMPLATE = """You are a helpful assistant that can use tools to answer questions.
 
-registry.register(
-    name="web_search",
-    description="搜索互联网获取最新信息，返回相关网页摘要",
-    parameters={"query": "str"},
-)(web_search)
-
-
-# ---------- 提示词构建 ----------
-SYSTEM_PROMPT_TEMPLATE = """你是一个智能助手，可以使用以下工具：
+Available tools:
 {tools_desc}
 
-请根据用户问题选择适当的工具，或直接回答。
-输出格式要求：
-- 如果使用工具，输出 JSON：{{"action": "工具名", "action_input": {{"参数名": "参数值"}}}}
-- 如果已经得到最终答案，输出 JSON：{{"action": "final", "action_input": "最终答案"}}
-注意：只能输出一个 JSON 对象，不要输出其他内容。"""
+When you need to use a tool, output JSON with this structure:
+{{"thought": "your reasoning", "action": "tool_name", "action_input": {{param: value}}}}
+
+When you have enough information to answer, output:
+{{"thought": "done", "final_answer": "your answer"}}
+
+Rules:
+- Use ONLY the tools listed above
+- Always think step by step before acting
+- Output exactly one JSON block per response"""
 
 def build_system_prompt(tools_desc: str) -> str:
     return SYSTEM_PROMPT_TEMPLATE.format(tools_desc=tools_desc)
-
-
 # ---------- Token 截断 ----------
 try:
     import tiktoken
@@ -130,38 +124,44 @@ except ImportError:
         return len(text) // 4
 
 
+
 def truncate_messages(messages: List[Dict[str, str]], max_tokens: int = 3000) -> List[Dict[str, str]]:
-    """智能截断：保留系统消息和最新的 N 轮对话"""
     total = sum(count_tokens(m.get("content", "")) for m in messages)
     if total <= max_tokens:
         return messages
-
-    while len(messages) > 1:
-        removed = messages.pop(1)
-        total -= count_tokens(removed.get("content", ""))
-        if total <= max_tokens:
-            break
-    else:
-        if total > max_tokens:
-            sys_content = messages[0]["content"]
-            messages[0]["content"] = sys_content[:max_tokens * 4]
+    # Delete oldest complete conversation pairs (assistant + observation) from the end
+    i = len(messages) - 2
+    while i >= 1 and total > max_tokens:
+        if messages[i].get("role") == "assistant" and i + 1 < len(messages):
+            total -= count_tokens(messages.pop(i).get("content", ""))
+            total -= count_tokens(messages.pop(i).get("content", ""))
+        i -= 1
     return messages
 
-
 # ---------- LLM 调用 ----------
-def call_llm(messages: List[Dict[str, str]], temperature: float = 0.0) -> Optional[str]:
-    try:
-        response = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=messages,
-            temperature=temperature,
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.error(f"LLM 调用失败: {e}")
-        return None
-
-
+# ---------- LLM Call with timeout and retry ----------
+def call_llm(messages: List[Dict[str, str]], temperature: float = 0.0, max_retries: int = 3) -> Optional[str]:
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=messages,
+                temperature=temperature,
+                timeout=30.0,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            err_str = str(e)
+            if "401" in err_str or "400" in err_str or "invalid" in err_str.lower():
+                logger.error(f"LLM non-retryable error: {e}")
+                return None
+            if attempt < max_retries - 1:
+                wait = 2 ** attempt
+                logger.warning(f"LLM call failed (attempt {attempt+1}/{max_retries}): {e}, retrying in {wait}s")
+                time.sleep(wait)
+            else:
+                logger.error(f"LLM call failed after {max_retries} attempts: {e}")
+                return None
 # ---------- 解析模型输出 ----------
 def parse_action(text: str) -> tuple:
     """从模型输出中提取 action 和 action_input"""
@@ -192,38 +192,38 @@ def parse_action(text: str) -> tuple:
 
     action = data.get("action")
     action_input = data.get("action_input")
-    if action is None:
-        raise ValueError("JSON 缺少 'action' 字段")
-    return action, action_input
-
-
-# ---------- ReAct 主循环 ----------
-def react_agent(
-    user_query: str,
-    max_steps: int = 5,
-    max_parse_retries: int = 3,
-    verbose: bool = True,
-) -> str:
-    """ReAct 智能体主循环"""
-    tools_desc = registry.get_tools_description()
+    final_answer = data.get("final_answer")
+    if action is not None:
+        return action, action_input
+    elif final_answer is not None:
+        return "final", final_answer
+    raise ValueError("JSON missing action or final_answer field")
+# ---------- ReAct Loop with multi-turn support ----------
+def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3, verbose: bool = True, conversation_history: Optional[List[Dict]] = None) -> str:
+    tools_desc = registry.get_tools_text_description()
     system_prompt = build_system_prompt(tools_desc)
-
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_query},
     ]
-
+    if conversation_history:
+        messages.extend(conversation_history)
+    messages.append({"role": "user", "content": user_query})
     for step in range(max_steps):
         if verbose:
-            logger.info(f"--- 步骤 {step+1} ---")
-
+            logger.info(f"--- Step {step+1} ---")
         response = call_llm(messages)
         if not response:
-            return "LLM 调用失败，任务中止。"
-
+            return "LLM call failed, stopping."
         if verbose:
-            logger.info(f"模型输出: {response}")
-
+            logger.info(f"Model response: {response}")
+        # Extract thought from response
+        thought = ""
+        clean_text = re.sub(r"```json\s*|```\s*", "", response).strip()
+        start = clean_text.find("{")
+        if start != -1:
+            thought_match = re.search(r"\"thought\":\s*\"([^\"]+)\"", clean_text[start:])
+            if thought_match:
+                thought = thought_match.group(1)
         parse_ok = False
         for retry in range(max_parse_retries):
             try:
@@ -231,26 +231,23 @@ def react_agent(
                 parse_ok = True
                 break
             except Exception as e:
-                error_msg = f"输出格式错误：{e}，请重新按 JSON 格式输出。"
+                error_msg = f"JSON parse error: {e}. Please output valid JSON with thought/action/final_answer fields."
                 messages.append({"role": "assistant", "content": response})
                 messages.append({"role": "user", "content": error_msg})
                 if verbose:
-                    logger.warning(f"解析失败 (尝试 {retry+1}/{max_parse_retries}): {e}")
-                response = call_llm(messages)
+                    logger.warning(f"Parse failed (retry {retry+1}/{max_parse_retries}): {e}")
+                response = call_llm(messages, temperature=0.3)
                 if not response:
-                    return "LLM 调用失败，任务中止。"
+                    return "LLM call failed during retry, stopping."
                 continue
-
         if not parse_ok:
-            return "解析模型输出超过重试次数，任务失败。"
-
+            return "Model could not produce valid JSON after retries."
         if verbose:
-            logger.info(f"动作: {action}, 输入: {action_input}")
-
-        if action == "final":
-            final_answer = action_input if isinstance(action_input, str) else json.dumps(action_input, ensure_ascii=False)
+            logger.info(f"Action: {action}, Input: {action_input}, Thought: {thought}")
+        if action == "final_answer" or action == "final":
+            final_answer = action_input if isinstance(action_input, str) else __import__("json").dumps(action_input, ensure_ascii=False)
+            messages.append({"role": "assistant", "content": response})
             return final_answer
-
         if not isinstance(action_input, dict):
             tool_info = next((t for t in registry.get_all() if t["name"] == action), None)
             if tool_info:
@@ -258,39 +255,40 @@ def react_agent(
                 if len(param_names) == 1:
                     action_input = {param_names[0]: action_input}
                 else:
-                    return f"工具 {action} 需要多个参数，但输入不是字典。"
+                    return f"Tool {action} requires named parameters, got non-dict input."
             else:
-                return f"未知工具 {action}"
-
+                return f"Unknown tool: {action}"
         observation = registry.execute(action, action_input)
         if verbose:
-            logger.info(f"观察: {observation}")
-
+            logger.info(f"Observation: {observation}")
         messages.append({"role": "assistant", "content": response})
         messages.append({"role": "user", "content": f"Observation: {observation}"})
         messages = truncate_messages(messages, max_tokens=3000)
+    return "Reached max steps without completing."
 
-    return "达到最大步数，任务未完成。"
-
-
-# ---------- 主入口 ----------
+# ---------- Main (multi-turn) ----------
 def main():
-    print("=== ReAct Agent 演示 ===")
-    print("支持的工具：")
+    print("=== ReAct Agent v2 ===")
+    print("Available tools:")
     for tool in registry.get_all():
-        print(f"  - {tool['name']}: {tool['description']}")
-
+        print(f"  - {tool[chr(110)+chr(97)+chr(109)+chr(101)]}: {tool[chr(100)+chr(101)+chr(115)+chr(99)+chr(114)+chr(105)+chr(112)+chr(116)+chr(105)+chr(111)+chr(110)]}")
+    print(f"Tool stats: {get_tool_stats()}")
+    conversation_history = []
     while True:
         try:
-            user_input = input("\\n请输入问题（输入 exit 退出）: ").strip()
+            user_input = input(chr(10)+chr(10)+chr(32)+chr(123)+chr(125)+chr(32)+chr(105)+chr(110)+chr(112)+chr(117)+chr(116)+chr(32)+chr(112)+chr(114)+chr(111)+chr(109)+chr(112)+chr(116)+chr(58)+chr(32)).strip()
         except (KeyboardInterrupt, EOFError):
-            print("\\n退出程序。")
+            print(chr(10)+chr(10)+chr(32)+chr(83)+chr(116)+chr(111)+chr(112)+chr(112)+chr(105)+chr(110)+chr(103)+chr(46))
             break
-
         if user_input.lower() == "exit":
             break
         if not user_input:
             continue
-
-        result = react_agent(user_input, verbose=True)
-        print(f"\\n最终答案: {result}")
+        result = react_agent(user_input, verbose=True, conversation_history=conversation_history)
+        print(chr(10)+f"Final Answer: {result}")
+        # Save to conversation history for multi-turn
+        conversation_history.append({"role": "user", "content": user_input})
+        conversation_history.append({"role": "assistant", "content": result})
+        # Keep history within token limit
+        conversation_history = truncate_messages([{"role": "system", "content": ""}] + conversation_history, max_tokens=2000)[1:]
+    print(chr(10)+"Goodbye!")

@@ -2,90 +2,145 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import quote
 import logging
+from typing import Dict, Any, List
 
-logger = logging.getLogger("ReActAgent.tools")
+logger = logging.getLogger('ReActAgent.tools')
+
+_tool_failure_count: Dict[str, int] = {}
+_TOOL_MAX_FAILURES = 3
+
+
+def get_tool_stats() -> Dict[str, Dict]:
+    result = {}
+    for name in ['calculator', 'web_search'] + list(_tool_failure_count.keys()):
+        if name not in result:
+            result[name] = {
+                'failure_count': _tool_failure_count.get(name, 0),
+                'circuit_open': _tool_failure_count.get(name, 0) >= _TOOL_MAX_FAILURES,
+            }
+    return result
+
+
+def record_tool_failure(name: str) -> None:
+    _tool_failure_count[name] = _tool_failure_count.get(name, 0) + 1
+
+
+def reset_tool_failures(name: str) -> None:
+    _tool_failure_count.pop(name, None)
+
+
+TOOLS_SCHEMA: List[Dict[str, Any]] = [
+    {
+        'name': 'calculator',
+        'description': (
+            'safely evaluate a mathematical expression. '
+            'Supports arithmetic (+, -, *, /, //, %) and functions (sqrt, sin, cos, tan, log). '
+            'Use ONLY for numeric computation. '
+            'DO NOT use for unit conversion, currency exchange, or fact-finding.'
+        ),
+        'strict': True,
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'expression': {
+                    'type': 'string',
+                    'description': 'the math expression to evaluate, e.g. 2+3*4 or sqrt(16)+1',
+                    'examples': ['2+3*4', 'sqrt(16)+1', '(10+5)/3'],
+                }
+            },
+            'required': ['expression'],
+            'additionalProperties': False,
+        },
+    },
+    {
+        'name': 'web_search',
+        'description': (
+            'search the internet for real-time information via Bing or DuckDuckGo. '
+            'Use for factual queries, news, weather, current events. '
+            'DO NOT use for calculations or simple trivia.'
+        ),
+        'strict': True,
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'query': {
+                    'type': 'string',
+                    'description': 'brief search query, 2-6 keywords',
+                    'minLength': 1,
+                    'maxLength': 100,
+                    'examples': ['Beijing weather today', 'Python asyncio tutorial', 'OpenAI GPT-5 announcement'],
+                }
+            },
+            'required': ['query'],
+            'additionalProperties': False,
+        },
+    },
+]
 
 
 def calculator(expression: str) -> str:
-    """安全计算数学表达式"""
     from simpleeval import simple_eval
     try:
         result = simple_eval(expression, names={})
         return str(result)
     except Exception as e:
-        return f"计算错误: {e}"
+        return f'calculation error: {e}'
 
 
 def web_search(query: str) -> str:
-    """增强版搜索：优先使用 Bing（国内可访问），失败则回退 DuckDuckGo"""
-    # 1. 尝试 Bing 搜索
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0"
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0'
         }
-        url = f"https://www.bing.com/search?q={quote(query)}"
+        url = f'https://www.bing.com/search?q={quote(query)}'
         resp = requests.get(url, headers=headers, timeout=8)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, 'html.parser')
-
         results = []
         for li in soup.select('ol#b_results li.b_algo')[:3]:
             h2 = li.find('h2')
-            if not h2:
-                continue
+            if not h2: continue
             a = h2.find('a')
-            if not a:
-                continue
+            if not a: continue
             title = a.get_text(strip=True)
             caption = li.find('div', class_='b_caption')
             if caption:
                 p = caption.find('p')
                 body = p.get_text(strip=True) if p else caption.get_text(strip=True)
             else:
-                body = ""
+                body = ''
             if title and body:
-                if len(body) > 200:
-                    body = body[:200] + '...'
-                results.append(f"{title}: {body}")
-        if results:
-            return chr(10).join(results)
+                if len(body) > 200: body = body[:200] + '...'
+                results.append(f'{title}: {body}')
+        if results: return chr(10).join(results)
         else:
-            # 备用选择器
             for li in soup.find_all('li', class_='b_algo')[:3]:
                 h2 = li.find('h2')
-                if not h2:
-                    continue
+                if not h2: continue
                 a = h2.find('a')
-                if not a:
-                    continue
+                if not a: continue
                 title = a.get_text(strip=True)
                 body = li.get_text(strip=True)
-                if title in body:
-                    body = body.replace(title, '').strip()
+                if title in body: body = body.replace(title, '').strip()
                 if body:
-                    if len(body) > 200:
-                        body = body[:200] + '...'
-                    results.append(f"{title}: {body}")
-            if results:
-                return chr(10).join(results)
-            return "未在 Bing 找到相关结果，请尝试其他关键词。"
+                    if len(body) > 200: body = body[:200] + '...'
+                    results.append(f'{title}: {body}')
+            if results: return chr(10).join(results)
+            return 'No relevant results found on Bing. Try different keywords.'
     except Exception as e:
-        logger.warning(f"Bing 搜索失败: {e}，尝试 DuckDuckGo")
-
-    # 2. 回退 DuckDuckGo
+        logger.warning(f'Bing search failed: {e}, trying DuckDuckGo')
     try:
         from ddgs import DDGS
         results = DDGS().text(query, max_results=3, timeout=15)
         if results:
             formatted = []
             for r in results:
-                title = r.get('title', '无标题')
+                title = r.get('title', 'No title')
                 body = r.get('body', '')
-                if len(body) > 200:
-                    body = body[:200] + '...'
-                formatted.append(f"{title}: {body}")
+                if len(body) > 200: body = body[:200] + '...'
+                formatted.append(f'{title}: {body}')
             return chr(10).join(formatted)
-        return "DuckDuckGo 未返回结果。"
+        return 'DuckDuckGo returned no results.'
     except Exception as e:
-        logger.error(f"DuckDuckGo 也失败: {e}")
-        return f"搜索失败：所有引擎均超时或出错，请稍后再试。"
+        logger.error(f'DuckDuckGo also failed: {e}')
+        return f'Search failed: all engines timed out or errored. Please try again later.'
