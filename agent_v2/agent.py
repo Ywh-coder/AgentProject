@@ -254,6 +254,7 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
             if thought_match:
                 thought = thought_match.group(1)
         parse_ok = False
+        parse_messages = list(messages)  # snapshot for parse retries (isolated from main messages)
         for retry in range(max_parse_retries):
             try:
                 action, action_input = parse_action(response)
@@ -261,11 +262,14 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
                 break
             except Exception as e:
                 error_msg = f"JSON parse error: {e}. Please output valid JSON with thought/action/final_answer fields."
-                messages.append({"role": "assistant", "content": response})
-                messages.append({"role": "user", "content": error_msg})
+                # Replace last assistant entry (if any) + append fresh response + error
+                if parse_messages and parse_messages[-1]["role"] == "assistant":
+                    parse_messages.pop()
+                parse_messages.append({"role": "assistant", "content": response})
+                parse_messages.append({"role": "user", "content": error_msg})
                 if verbose:
                     logger.warning(f"Parse failed (retry {retry+1}/{max_parse_retries}): {e}")
-                response = call_llm(messages, temperature=0.3)
+                response = call_llm(parse_messages, temperature=0.3)
                 if not response:
                     return "LLM call failed during retry, stopping."
                 continue
