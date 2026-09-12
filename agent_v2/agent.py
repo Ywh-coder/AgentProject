@@ -86,10 +86,21 @@ class ToolRegistry:
     def get_tools_json_schema(self) -> List[Dict]:
         return TOOLS_SCHEMA
     def get_tools_text_description(self) -> str:
+        """Format tool descriptions as human-readable text from JSON Schema."""
         result = []
         for t in self._tools.values():
-            params = ", ".join(f"{k}: {v}" for k, v in t["parameters"].items())
-            result.append(f"- {t['name']}({params}): {t['description']}")
+            schema = t["parameters"]
+            props = schema.get("properties", {})
+            param_strs = []
+            for pname, pspec in props.items():
+                ptype = pspec.get("type", "str")
+                pdesc = pspec.get("description", "")
+                if pdesc:
+                    param_strs.append(f"{pname} ({ptype}): {pdesc[:60]}")
+                else:
+                    param_strs.append(f"{pname} ({ptype})")
+            params = ", ".join(param_strs) if param_strs else ""
+            result.append(f"- {t["name"]}({params}): {t["description"]}")
         return chr(10).join(result)
 
 registry = ToolRegistry()
