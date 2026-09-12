@@ -85,7 +85,7 @@ class ToolRegistry:
         result = []
         for t in self._tools.values():
             params = ", ".join(f"{k}: {v}" for k, v in t["parameters"].items())
-            result.append(f"- {t[chr(110)+chr(97)+chr(109)+chr(101)]}({params}): {t[chr(100)+chr(101)+chr(115)+chr(99)+chr(114)+chr(105)+chr(112)+chr(116)+chr(105)+chr(111)+chr(110)]}")
+            result.append(f"- {t['name']}({params}): {t['description']}")
         return chr(10).join(result)
 
 registry = ToolRegistry()
@@ -271,24 +271,24 @@ def main():
     print("=== ReAct Agent v2 ===")
     print("Available tools:")
     for tool in registry.get_all():
-        print(f"  - {tool[chr(110)+chr(97)+chr(109)+chr(101)]}: {tool[chr(100)+chr(101)+chr(115)+chr(99)+chr(114)+chr(105)+chr(112)+chr(116)+chr(105)+chr(111)+chr(110)]}")
+        print(f"  - {tool['name']}: {tool['description']}")
     print(f"Tool stats: {get_tool_stats()}")
     conversation_history = []
     while True:
         try:
-            user_input = input(chr(10)+chr(10)+chr(32)+chr(123)+chr(125)+chr(32)+chr(105)+chr(110)+chr(112)+chr(117)+chr(116)+chr(32)+chr(112)+chr(114)+chr(111)+chr(109)+chr(112)+chr(116)+chr(58)+chr(32)).strip()
+            user_input = input('\n\n {} input prompt: ').strip()
         except (KeyboardInterrupt, EOFError):
-            print(chr(10)+chr(10)+chr(32)+chr(83)+chr(116)+chr(111)+chr(112)+chr(112)+chr(105)+chr(110)+chr(103)+chr(46))
+            print('\n\n Stopping.')
             break
         if user_input.lower() == "exit":
             break
         if not user_input:
             continue
         result = react_agent(user_input, verbose=True, conversation_history=conversation_history)
-        print(chr(10)+f"Final Answer: {result}")
+        print("\nFinal Answer: " + result)
         # Save to conversation history for multi-turn
         conversation_history.append({"role": "user", "content": user_input})
         conversation_history.append({"role": "assistant", "content": result})
         # Keep history within token limit
         conversation_history = truncate_messages([{"role": "system", "content": ""}] + conversation_history, max_tokens=2000)[1:]
-    print(chr(10)+"Goodbye!")
+    print("\nGoodbye!")
