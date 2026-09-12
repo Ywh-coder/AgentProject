@@ -6,27 +6,6 @@ from typing import Dict, Any, List
 
 logger = logging.getLogger('ReActAgent.tools')
 
-_tool_failure_count: Dict[str, int] = {}
-_TOOL_MAX_FAILURES = 3
-
-
-def get_tool_stats() -> Dict[str, Dict]:
-    result = {}
-    for name in ['calculator', 'web_search'] + list(_tool_failure_count.keys()):
-        if name not in result:
-            result[name] = {
-                'failure_count': _tool_failure_count.get(name, 0),
-                'circuit_open': _tool_failure_count.get(name, 0) >= _TOOL_MAX_FAILURES,
-            }
-    return result
-
-
-def record_tool_failure(name: str) -> None:
-    _tool_failure_count[name] = _tool_failure_count.get(name, 0) + 1
-
-
-def reset_tool_failures(name: str) -> None:
-    _tool_failure_count.pop(name, None)
 
 
 TOOLS_SCHEMA: List[Dict[str, Any]] = [

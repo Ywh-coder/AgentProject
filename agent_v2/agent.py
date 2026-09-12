@@ -32,10 +32,11 @@ client = OpenAI(
     base_url="https://api.deepseek.com/v1",
 )
 
-from .tools import calculator, web_search, get_tool_stats, TOOLS_SCHEMA, _TOOL_MAX_FAILURES
+from .tools import calculator, web_search, TOOLS_SCHEMA
 
 
 
+_TOOL_MAX_FAILURES = 3
 # ---------- Circuit Breaker ----------
 class CircuitBreaker:
     def __init__(self, max_failures=_TOOL_MAX_FAILURES):
@@ -47,6 +48,9 @@ class CircuitBreaker:
         self._failures[name] = self._failures.get(name, 0) + 1
     def reset(self, name: str) -> None:
         self._failures.pop(name, None)
+    def get_stats(self) -> Dict[str, Dict]:
+        return {name: {"failure_count": count, "circuit_open": count >= self._max} for name, count in self._failures.items()}
+
 
 circuit_breaker = CircuitBreaker()
 
@@ -272,7 +276,7 @@ def main():
     print("Available tools:")
     for tool in registry.get_all():
         print(f"  - {tool['name']}: {tool['description']}")
-    print(f"Tool stats: {get_tool_stats()}")
+    print(f"Tool stats: {circuit_breaker.get_stats()}")
     conversation_history = []
     while True:
         try:
