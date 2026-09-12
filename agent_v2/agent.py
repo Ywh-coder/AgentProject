@@ -274,7 +274,7 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
         if verbose:
             logger.info(f"Action: {action}, Input: {action_input}, Thought: {thought}")
         if action == "final_answer" or action == "final":
-            final_answer = action_input if isinstance(action_input, str) else __import__("json").dumps(action_input, ensure_ascii=False)
+            final_answer = action_input if isinstance(action_input, str) else json.dumps(action_input, ensure_ascii=False)
             messages.append({"role": "assistant", "content": response})
             return final_answer
         if not isinstance(action_input, dict):
@@ -305,7 +305,7 @@ def main():
     conversation_history = []
     while True:
         try:
-            user_input = input('\n\n {} input prompt: ').strip()
+            user_input = input('\n\n>>> input prompt: ').strip()
         except (KeyboardInterrupt, EOFError):
             print('\n\n Stopping.')
             break
