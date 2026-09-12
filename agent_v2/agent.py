@@ -271,7 +271,7 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
                     logger.warning(f"Parse failed (retry {retry+1}/{max_parse_retries}): {e}")
                 response = call_llm(parse_messages, temperature=0.3)
                 if not response:
-                    return "LLM call failed during retry, stopping."
+                    return None, "LLM call failed during retry, stopping."
                 continue
         if not parse_ok:
             return None, "Model could not produce valid JSON after retries."
@@ -320,10 +320,10 @@ def main():
         updated_messages, result = react_agent(user_input, verbose=True, conversation_history=conversation_history)
         if updated_messages:
             conversation_history = [m for m in updated_messages if m["role"] != "system"]
+            # Save to conversation history for multi-turn
+            conversation_history.append({"role": "user", "content": user_input})
+            conversation_history.append({"role": "assistant", "content": result})
         print("\nFinal Answer: " + result)
-        # Save to conversation history for multi-turn
-        conversation_history.append({"role": "user", "content": user_input})
-        conversation_history.append({"role": "assistant", "content": result})
         # Keep history within token limit
         conversation_history = truncate_messages([{"role": "system", "content": ""}] + conversation_history, max_tokens=2000)[1:]
     print("\nGoodbye!")
