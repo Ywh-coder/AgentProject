@@ -228,7 +228,7 @@ def parse_action(text: str) -> tuple:
         return "final", final_answer
     raise ValueError("JSON missing action or final_answer field")
 # ---------- ReAct Loop with multi-turn support ----------
-def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3, verbose: bool = True, conversation_history: Optional[List[Dict]] = None) -> str:
+def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3, verbose: bool = True, conversation_history: Optional[List[Dict]] = None) -> tuple:
     tools_desc = registry.get_tools_text_description()
     system_prompt = build_system_prompt(tools_desc)
     messages = [
@@ -242,7 +242,7 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
             logger.info(f"--- Step {step+1} ---")
         response = call_llm(messages)
         if not response:
-            return "LLM call failed, stopping."
+            return None, "LLM call failed, stopping."
         if verbose:
             logger.info(f"Model response: {response}")
         # Extract thought from response
@@ -274,13 +274,13 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
                     return "LLM call failed during retry, stopping."
                 continue
         if not parse_ok:
-            return "Model could not produce valid JSON after retries."
+            return None, "Model could not produce valid JSON after retries."
         if verbose:
             logger.info(f"Action: {action}, Input: {action_input}, Thought: {thought}")
         if action == "final_answer" or action == "final":
             final_answer = action_input if isinstance(action_input, str) else json.dumps(action_input, ensure_ascii=False)
             messages.append({"role": "assistant", "content": response})
-            return final_answer
+            return messages, final_answer
         if not isinstance(action_input, dict):
             tool_info = next((t for t in registry.get_all() if t["name"] == action), None)
             if tool_info:
@@ -297,7 +297,7 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
         messages.append({"role": "assistant", "content": response})
         messages.append({"role": "user", "content": f"Observation: {observation}"})
         messages = truncate_messages(messages, max_tokens=3000)
-    return "Reached max steps without completing."
+    return messages, "Reached max steps without completing."
 
 # ---------- Main (multi-turn) ----------
 def main():
@@ -317,7 +317,9 @@ def main():
             break
         if not user_input:
             continue
-        result = react_agent(user_input, verbose=True, conversation_history=conversation_history)
+        updated_messages, result = react_agent(user_input, verbose=True, conversation_history=conversation_history)
+        if updated_messages:
+            conversation_history = [m for m in updated_messages if m["role"] != "system"]
         print("\nFinal Answer: " + result)
         # Save to conversation history for multi-turn
         conversation_history.append({"role": "user", "content": user_input})
