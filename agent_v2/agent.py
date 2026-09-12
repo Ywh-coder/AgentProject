@@ -141,18 +141,32 @@ except ImportError:
 
 
 def truncate_messages(messages: List[Dict[str, str]], max_tokens: int = 3000) -> List[Dict[str, str]]:
+    """Trim old conversation turns (keeping system prompt) to fit within max_tokens.
+    Removes complete assistant+observation pairs from the end."""
     total = sum(count_tokens(m.get("content", "")) for m in messages)
     if total <= max_tokens:
         return messages
-    # Delete oldest complete conversation pairs (assistant + observation) from the end
-    i = len(messages) - 2
-    while i >= 1 and total > max_tokens:
+    # Group messages into turns: first msg is system, then pairs of (assistant, observation)
+    turns = []  # list of [assistant_msg, observation_msg]
+    i = 1  # skip system prompt at index 0
+    while i < len(messages):
         if messages[i].get("role") == "assistant" and i + 1 < len(messages):
-            total -= count_tokens(messages.pop(i).get("content", ""))
-            total -= count_tokens(messages.pop(i).get("content", ""))
-        i -= 1
-    return messages
-
+            turns.append([messages[i], messages[i + 1]])
+            i += 2
+        else:
+            # Orphaned message (no matching pair), skip it
+            i += 1
+    # Remove turns from the end until under safe limit (留出 20% buffer)
+    safe_limit = int(max_tokens * 0.8)
+    while turns and total > safe_limit:
+        turn = turns.pop()
+        total -= count_tokens(turn[0].get("content", ""))
+        total -= count_tokens(turn[1].get("content", ""))
+    # Rebuild: system + remaining complete turns only
+    result = [messages[0]] if messages else []
+    for turn in turns:
+        result.extend(turn)
+    return result
 # ---------- LLM 调用 ----------
 # ---------- LLM Call with timeout and retry ----------
 def call_llm(messages: List[Dict[str, str]], temperature: float = 0.0, max_retries: int = 3) -> Optional[str]:
