@@ -6,6 +6,7 @@ import logging
 from typing import Dict, Any, List, Optional, Callable
 import locale
 import time
+import uuid
 
 # ---------- 环境与日志配置 ----------
 try:
@@ -248,6 +249,19 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
     (without system prompt and without the original user_query).
     Caller appends user_query + final_answer around the trace.
     Caller is responsible for appending user_query and final_answer to history."""
+
+    # ---------- Trace ----------
+    trace_id = str(uuid.uuid4())[:8]
+    trace: dict = {
+        "trace_id": trace_id,
+        "query": user_query,
+        "conversation_history_len": len(conversation_history) if conversation_history else 0,
+        "steps": [],
+        "final_answer": None,
+        "success": False,
+        "error": None,
+    }
+    step_start_global = time.time()
     tools_desc = registry.get_tools_text_description()
     system_prompt = build_system_prompt(tools_desc)
     messages = [
@@ -257,11 +271,15 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
         messages.extend(conversation_history)
     messages.append({"role": "user", "content": user_query})
     for step in range(max_steps):
+        step_start = time.time()
         if verbose:
             logger.info(f"--- Step {step+1} ---")
         response = call_llm(messages)
         if not response:
-            return [], "LLM call failed, stopping."
+            trace["error"] = "LLM call failed"
+            trace["total_latency_ms"] = int((time.time() - step_start_global) * 1000)
+            _save_trace(trace)
+            return [], None, trace
         if verbose:
             logger.info(f"Model response: {response}")
         # Extract thought from response
@@ -290,10 +308,16 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
                     logger.warning(f"Parse failed (retry {retry+1}/{max_parse_retries}): {e}")
                 response = call_llm(parse_messages, temperature=0.3)
                 if not response:
-                    return [], "LLM call failed during retry, stopping."
+                    trace["error"] = "LLM call failed during retry"
+                    trace["total_latency_ms"] = int((time.time() - step_start_global) * 1000)
+                    _save_trace(trace)
+                    return [], None, trace
                 continue
         if not parse_ok:
-            return [], "Model could not produce valid JSON after retries."
+            trace["error"] = "Parse retry exhausted"
+            trace["total_latency_ms"] = int((time.time() - step_start_global) * 1000)
+            _save_trace(trace)
+            return [], None, trace
         if verbose:
             logger.info(f"Action: {action}, Input: {action_input}, Thought: {thought}")
         if action == "final_answer" or action == "final":
@@ -303,7 +327,23 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
             # messages = [system, ...prev_history, user_query, assistant1, obs1, ...]
             n_prev = 1 + len(conversation_history) if conversation_history else 1
             new_trace = messages[n_prev + 1:]  # skip user_query, start from assistant1
-            return new_trace, final_answer
+            # Extract only the assistant+observation pairs added this turn.
+            n_prev = 1 + len(conversation_history) if conversation_history else 1
+            new_history = messages[n_prev + 1:]  # skip user_query
+            trace["steps"].append({
+                "step": step + 1,
+                "thought": thought,
+                "action": "final_answer",
+                "action_input": None,
+                "observation": None,
+                "final_answer": final_answer,
+                "latency_ms": int((time.time() - step_start) * 1000),
+            })
+            trace["final_answer"] = final_answer
+            trace["success"] = True
+            trace["total_latency_ms"] = int((time.time() - step_start_global) * 1000)
+            _save_trace(trace)
+            return new_history, final_answer, trace
         if not isinstance(action_input, dict):
             tool_info = next((t for t in registry.get_all() if t["name"] == action), None)
             if tool_info:
@@ -311,9 +351,15 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
                 if len(param_names) == 1:
                     action_input = {param_names[0]: action_input}
                 else:
-                    return [], f"Tool {action} requires named parameters, got non-dict input."
+                    trace["error"] = f"Tool {action} param error"
+                    trace["total_latency_ms"] = int((time.time() - step_start_global) * 1000)
+                    _save_trace(trace)
+                    return [], None, trace
             else:
-                return [], f"Unknown tool: {action}"
+                trace["error"] = f"Unknown tool: {action}"
+                trace["total_latency_ms"] = int((time.time() - step_start_global) * 1000)
+                _save_trace(trace)
+                return [], None, trace
         observation = registry.execute(action, action_input, confirm_cb=confirm_cb)
         if verbose:
             logger.info(f"Observation: {observation}")
@@ -323,8 +369,50 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
         else:
             observation_msg = f"Observation: {observation}"
         messages.append({"role": "user", "content": observation_msg})
-        messages = truncate_messages(messages, max_tokens=3000)
-    return [], "Reached max steps without completing."
+        trace["steps"].append({
+            "step": step + 1,
+            "thought": thought,
+            "action": action,
+            "action_input": action_input,
+            "observation": observation,
+            "latency_ms": int((time.time() - step_start) * 1000),
+        })
+    trace["total_latency_ms"] = int((time.time() - step_start_global) * 1000)
+    _save_trace(trace)
+    return [], None, trace
+
+
+def _save_trace(trace: dict) -> None:
+    """Persist trace to disk."""
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    trace_dir = os.path.join(project_root, "traces")
+    os.makedirs(trace_dir, exist_ok=True)
+    tid = trace["trace_id"]
+    tpath = os.path.join(trace_dir, tid + ".json")
+    with open(tpath, "w", encoding="utf-8") as f:
+        json.dump(trace, f, ensure_ascii=False, indent=2)
+
+
+def _print_trace_summary(trace: dict) -> None:
+    """Print human-readable trace summary."""
+    status = "SUCCESS" if trace["success"] else "FAILED"
+    tid = trace["trace_id"]
+    print(f"\n[Trace {tid}] {status}")
+    for s in trace.get("steps", []):
+        icon = "->" if s["action"] == "final_answer" else ">>"
+        act = s["action"] or "?"
+        ai = json.dumps(s.get("action_input"), ensure_ascii=False) if s.get("action_input") else "null"
+        obs = (s.get("observation") or "")[:80].replace(chr(10), " ")
+        sid = s["step"]; lm = s["latency_ms"]
+        if obs:
+            print(f"  {icon} Step {sid}: {act}({ai[:40]}) [{lm}ms] => {obs}...")
+        else:
+            fa = s.get("final_answer") or ""
+            print(f"  {icon} Step {sid}: {act} => {fa[:80]}")
+    total = trace.get("total_latency_ms", 0)
+    nsteps = len(trace.get("steps", []))
+    print(f"  Total: {nsteps} steps, {total}ms")
+
 
 # ---------- Main (multi-turn) ----------
 def main():
@@ -349,11 +437,13 @@ def main():
             print(f"   Args: {args_preview}")
             ans = input("   Confirm? (y/n): ").strip().lower()
             return ans == "y"
-        new_trace, result = react_agent(user_input, verbose=True, conversation_history=conversation_history, confirm_cb=_confirm)
-        if new_trace is not None:
+        new_history, result, trace = react_agent(user_input, verbose=True, conversation_history=conversation_history, confirm_cb=_confirm)
+        if new_history is not None:
             conversation_history.append({"role": "user", "content": user_input})
-            conversation_history.extend(new_trace)
+            conversation_history.extend(new_history)
             conversation_history.append({"role": "assistant", "content": result})
+        if trace:
+            _print_trace_summary(trace)
         print("\nFinal Answer: " + result)
         conversation_history = truncate_messages([{"role": "system", "content": ""}] + conversation_history, max_tokens=2000)[1:]
     print("\nGoodbye!")
