@@ -32,7 +32,7 @@ client = OpenAI(
     base_url="https://api.deepseek.com/v1",
 )
 
-from .tools import calculator, web_search, TOOLS_SCHEMA
+from .tools import calculator, web_search, send_email, TOOLS_SCHEMA
 
 
 
@@ -59,19 +59,31 @@ class ToolRegistry:
     def __init__(self):
         self._tools: Dict[str, Dict] = {}
         self._stats: Dict[str, Dict[str, int]] = {"calls": {}, "success": {}, "failure": {}}
-    def register(self, name: str, description: str, parameters: Dict[str, Any]):
+    def register(self, name: str, description: str, parameters: Dict[str, Any], requires_confirmation: bool = False):
         def decorator(func: Callable):
-            self._tools[name] = {"name": name, "description": description, "parameters": parameters, "function": func}
+            self._tools[name] = {
+                "name": name, "description": description, "parameters": parameters,
+                "function": func, "requires_confirmation": requires_confirmation,
+            }
             return func
         return decorator
     def get_all(self) -> List[Dict]:
-        return [{"name": t["name"], "description": t["description"], "parameters": t["parameters"]} for t in self._tools.values()]
-    def execute(self, name: str, args: Dict[str, Any]) -> str:
+        return [{"name": t["name"], "description": t["description"], "parameters": t["parameters"],
+                 "requires_confirmation": t.get("requires_confirmation", False)} for t in self._tools.values()]
+    def execute(self, name: str, args: Dict[str, Any], confirm_cb=None) -> str:
+        """Execute a tool. If confirm_cb is provided and tool requires confirmation,
+        the callback is called with (name, args) and must return True/False."""
         if circuit_breaker.is_open(name):
             return f"Circuit open for tool {name}: too many consecutive failures. Aborting."
         tool = self._tools.get(name)
         if not tool:
             return f"Unknown tool: {name}"
+        # Danger confirmation
+        if tool.get("requires_confirmation") and confirm_cb is not None:
+            preview = json.dumps(args, ensure_ascii=False)
+            confirmed = confirm_cb(name, preview)
+            if not confirmed:
+                return f"User cancelled tool {name}"
         self._stats["calls"][name] = self._stats["calls"].get(name, 0) + 1
         try:
             result = tool["function"](**args)
@@ -104,8 +116,9 @@ class ToolRegistry:
         return chr(10).join(result)
 
 registry = ToolRegistry()
-registry.register(name="calculator", description=TOOLS_SCHEMA[0]["description"], parameters=TOOLS_SCHEMA[0]["parameters"])(calculator)
-registry.register(name="web_search", description=TOOLS_SCHEMA[1]["description"], parameters=TOOLS_SCHEMA[1]["parameters"])(web_search)
+registry.register(name="calculator", description=TOOLS_SCHEMA[0]["description"], parameters=TOOLS_SCHEMA[0]["parameters"], requires_confirmation=False)(calculator)
+registry.register(name="web_search", description=TOOLS_SCHEMA[1]["description"], parameters=TOOLS_SCHEMA[1]["parameters"], requires_confirmation=False)(web_search)
+registry.register(name="send_email", description=TOOLS_SCHEMA[2]["description"], parameters=TOOLS_SCHEMA[2]["parameters"], requires_confirmation=True)(send_email)
 
 # ---------- System Prompt ----------
 SYSTEM_PROMPT_TEMPLATE = """You are a helpful assistant that can use tools to answer questions.
@@ -229,7 +242,7 @@ def parse_action(text: str) -> tuple:
         return "final", final_answer
     raise ValueError("JSON missing action or final_answer field")
 # ---------- ReAct Loop with multi-turn support ----------
-def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3, verbose: bool = True, conversation_history: Optional[List[Dict]] = None) -> tuple:
+def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3, verbose: bool = True, conversation_history: Optional[List[Dict]] = None, confirm_cb=None) -> tuple:
     """Returns (new_trace, final_answer).
     new_trace contains ONLY the assistant+observation pairs from THIS turn
     (without system prompt and without the original user_query).
@@ -301,7 +314,7 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
                     return [], f"Tool {action} requires named parameters, got non-dict input."
             else:
                 return [], f"Unknown tool: {action}"
-        observation = registry.execute(action, action_input)
+        observation = registry.execute(action, action_input, confirm_cb=confirm_cb)
         if verbose:
             logger.info(f"Observation: {observation}")
         messages.append({"role": "assistant", "content": response})
@@ -331,7 +344,12 @@ def main():
             break
         if not user_input:
             continue
-        new_trace, result = react_agent(user_input, verbose=True, conversation_history=conversation_history)
+        def _confirm(name: str, args_preview: str) -> bool:
+            print(f"\n\n \u26a0\ufe0f  Dangerous tool: {name}")
+            print(f"   Args: {args_preview}")
+            ans = input("   Confirm? (y/n): ").strip().lower()
+            return ans == "y"
+        new_trace, result = react_agent(user_input, verbose=True, conversation_history=conversation_history, confirm_cb=_confirm)
         if new_trace is not None:
             conversation_history.append({"role": "user", "content": user_input})
             conversation_history.extend(new_trace)

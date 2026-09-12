@@ -131,7 +131,7 @@ class TestCountTokens:
 
 class TestToolsSchema:
     def test_two_tools(self):
-        assert len(TOOLS_SCHEMA) == 2
+        assert len(TOOLS_SCHEMA) == 3
 
     def test_calculator_schema(self):
         t = TOOLS_SCHEMA[0]
@@ -150,6 +150,16 @@ class TestToolsSchema:
         assert "query" in params["required"]
         assert params["properties"]["query"]["type"] == "string"
         assert "examples" in params["properties"]["query"]
+    def test_send_email_schema(self):
+        t = TOOLS_SCHEMA[2]
+        assert t["name"] == "send_email"
+        assert t["strict"] is True
+        params = t["parameters"]
+        assert set(params["required"]) == {"to", "subject", "body"}
+        assert params["properties"]["to"]["type"] == "string"
+        assert "examples" in params["properties"]["to"]
+        assert "examples" in params["properties"]["subject"]
+        assert "examples" in params["properties"]["body"]
 
 
 if __name__ == "__main__":
@@ -245,3 +255,30 @@ class TestMultiTurnTrace:
         # Turn 2: pass history as conversation_history
         assert len(conversation_history) == 5
         # This proves the trace is preserved for the next turn
+
+class TestDangerConfirmation:
+    """Test the requires_confirmation / confirm_cb mechanism."""
+    def test_safe_tool_no_prompt(self):
+        from agent_v2.agent import registry
+        result = registry.execute("calculator", {"expression": "1+1"})
+        assert result == "2"
+
+    def test_dangerous_tool_rejected(self):
+        from agent_v2.agent import registry
+        def deny(name, args):
+            return False
+        result = registry.execute("send_email", {"to": "a@b.com", "subject": "Hi", "body": "Hello"}, confirm_cb=deny)
+        assert "cancelled" in result.lower() or "User cancelled" in result
+
+    def test_dangerous_tool_accepted(self):
+        from agent_v2.agent import registry
+        def allow(name, args):
+            return True
+        result = registry.execute("send_email", {"to": "a@b.com", "subject": "Hi", "body": "Hello"}, confirm_cb=allow)
+        assert "Email sent" in result or "Simulated" in result
+
+    def test_dangerous_tool_without_cb_just_fails_silently(self):
+        # Without confirm_cb, dangerous tool still executes (backward compat)
+        from agent_v2.agent import registry
+        result = registry.execute("send_email", {"to": "a@b.com", "subject": "Hi", "body": "Hello"}, confirm_cb=None)
+        assert "Email sent" in result or "Simulated" in result

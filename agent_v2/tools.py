@@ -54,6 +54,37 @@ TOOLS_SCHEMA: List[Dict[str, Any]] = [
             'additionalProperties': False,
         },
     },
+    {
+        'name': 'send_email',
+        'description': (
+            'send an email to a recipient. DANGEROUS operation — '
+            'requires user confirmation before execution. '
+            'Use ONLY when the user explicitly asks to send an email.'
+        ),
+        'strict': True,
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'to': {
+                    'type': 'string',
+                    'description': 'recipient email address',
+                    'examples': ['user@example.com'],
+                },
+                'subject': {
+                    'type': 'string',
+                    'description': 'email subject line',
+                    'examples': ['Meeting tomorrow', 'Hello'],
+                },
+                'body': {
+                    'type': 'string',
+                    'description': 'email body text',
+                    'examples': ['Hi, are we still meeting at 3pm?'],
+                },
+            },
+            'required': ['to', 'subject', 'body'],
+            'additionalProperties': False,
+        },
+    },
 ]
 
 
@@ -123,3 +154,8 @@ def web_search(query: str) -> str:
     except Exception as e:
         logger.error(f'DuckDuckGo also failed: {e}')
         return f'Search failed: all engines timed out or errored. Please try again later.'
+
+
+def send_email(to: str, subject: str, body: str) -> str:
+    """Simulate sending an email. In production this would integrate with an SMTP server."""
+    return f"[Simulated] Email sent to {to}, subject: {subject}"
