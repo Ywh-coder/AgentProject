@@ -113,14 +113,15 @@ SYSTEM_PROMPT_TEMPLATE = """You are a helpful assistant that can use tools to an
 Available tools:
 {tools_desc}
 
-When you need to use a tool, output JSON with this structure:
-{{"thought": "your reasoning", "action": "tool_name", "action_input": {{param: value}}}}
-
-When you have enough information to answer, output:
-{{"thought": "done", "final_answer": "your answer"}}
+Output format (one JSON per response):
+{{"thought": "your step-by-step reasoning", "action": "tool_name", "action_input": {{...}}}}
+When done: {{"thought": "summary of reasoning", "final_answer": "your answer"}}
 
 Rules:
 - Use ONLY the tools listed above
+- "thought" must explain WHY you choose this action and what you expect
+- If a tool failed before, explain what you'll do differently next time
+- Do not repeat the same failing action more than once
 - Always think step by step before acting
 - Output exactly one JSON block per response"""
 
@@ -295,7 +296,11 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
         if verbose:
             logger.info(f"Observation: {observation}")
         messages.append({"role": "assistant", "content": response})
-        messages.append({"role": "user", "content": f"Observation: {observation}"})
+        if thought:
+            observation_msg = f"[Reasoning: {thought}]\nObservation: {observation}"
+        else:
+            observation_msg = f"Observation: {observation}"
+        messages.append({"role": "user", "content": observation_msg})
         messages = truncate_messages(messages, max_tokens=3000)
     return messages, "Reached max steps without completing."
 
