@@ -402,7 +402,7 @@ def _print_trace_summary(trace: dict) -> None:
         icon = "->" if s["action"] == "final_answer" else ">>"
         act = s["action"] or "?"
         ai = json.dumps(s.get("action_input"), ensure_ascii=False) if s.get("action_input") else "null"
-        obs = (s.get("observation") or "")[:80].replace(chr(10), " ")
+        obs = (s.get("observation") or "")[:80].replace("\n", " ")
         sid = s["step"]; lm = s["latency_ms"]
         if obs:
             print(f"  {icon} Step {sid}: {act}({ai[:40]}) [{lm}ms] => {obs}...")
@@ -438,7 +438,7 @@ def main():
             ans = input("   Confirm? (y/n): ").strip().lower()
             return ans == "y"
         new_history, result, trace = react_agent(user_input, verbose=True, conversation_history=conversation_history, confirm_cb=_confirm)
-        if new_history is not None:
+        if new_history is not None and result is not None:
             conversation_history.append({"role": "user", "content": user_input})
             conversation_history.extend(new_history)
             conversation_history.append({"role": "assistant", "content": result})

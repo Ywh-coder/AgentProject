@@ -102,14 +102,14 @@ class EvalRunner:
         for i, q in enumerate(self.questions):
             if verbose:
                 print(f"\n[{i+1}/{len(self.questions)}] ({q.category}) {q.question}")
-            answer = react_agent(q.question, max_steps=max_steps, verbose=False)
+            history, answer, trace = react_agent(q.question, max_steps=max_steps, verbose=False)
             passed = self._check_answer(q, answer)
             result = EvalResult(
                 question=q.question,
                 passed=passed,
                 expected=q.expected_answer,
                 actual=answer,
-                steps_used=max_steps,  # react_agent returns str, not step count
+                steps_used=len(trace.get("steps", [])) if trace else 0,
                 category=q.category,
             )
             self.results.append(result)
@@ -139,7 +139,7 @@ class EvalRunner:
             lines.append(f"  {icon} {r.question[:50]}...")
             if not r.passed:
                 lines.append(f"    Expected: {r.expected} | Got: {r.actual[:80]}")
-        return chr(10).join(lines)
+        return "\n".join(lines)
 
 
 def run_eval(max_steps: int = 5, verbose: bool = True) -> List[EvalResult]:

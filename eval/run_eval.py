@@ -54,7 +54,7 @@ def run_eval(test_file: str = "eval/test_cases.jsonl", max_steps: int = 5, outpu
     for i, case in enumerate(cases, 1):
         print(f"\n[{i}/{len(cases)}] ({case['category']}) {case['query'][:50]}...")
         start = time.time()
-        history, answer = react_agent(case["query"], max_steps=max_steps, verbose=False)
+        history, answer, trace = react_agent(case["query"], max_steps=max_steps, verbose=False)
         elapsed = time.time() - start
 
         called_tools = extract_called_tools(history)

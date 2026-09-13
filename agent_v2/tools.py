@@ -122,7 +122,7 @@ def web_search(query: str) -> str:
             if title and body:
                 if len(body) > 200: body = body[:200] + '...'
                 results.append(f'{title}: {body}')
-        if results: return chr(10).join(results)
+        if results: return "\n".join(results)
         else:
             for li in soup.find_all('li', class_='b_algo')[:3]:
                 h2 = li.find('h2')
@@ -135,7 +135,7 @@ def web_search(query: str) -> str:
                 if body:
                     if len(body) > 200: body = body[:200] + '...'
                     results.append(f'{title}: {body}')
-            if results: return chr(10).join(results)
+            if results: return "\n".join(results)
             return 'No relevant results found on Bing. Try different keywords.'
     except Exception as e:
         logger.warning(f'Bing search failed: {e}, trying DuckDuckGo')
@@ -149,7 +149,7 @@ def web_search(query: str) -> str:
                 body = r.get('body', '')
                 if len(body) > 200: body = body[:200] + '...'
                 formatted.append(f'{title}: {body}')
-            return chr(10).join(formatted)
+            return "\n".join(formatted)
         return 'DuckDuckGo returned no results.'
     except Exception as e:
         logger.error(f'DuckDuckGo also failed: {e}')
