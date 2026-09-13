@@ -113,8 +113,8 @@ class ToolRegistry:
                 else:
                     param_strs.append(f"{pname} ({ptype})")
             params = ", ".join(param_strs) if param_strs else ""
-            result.append(f"- {t["name"]}({params}): {t["description"]}")
-        return chr(10).join(result)
+            result.append(f"- {t['name']}({params}): {t['description']}")
+        return "\n".join(result)
 
 registry = ToolRegistry()
 registry.register(name="calculator", description=TOOLS_SCHEMA[0]["description"], parameters=TOOLS_SCHEMA[0]["parameters"], requires_confirmation=False)(calculator)
