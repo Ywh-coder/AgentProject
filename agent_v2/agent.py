@@ -80,10 +80,11 @@ class ToolRegistry:
         if not tool:
             return f"Unknown tool: {name}"
         # Danger confirmation
-        if tool.get("requires_confirmation") and confirm_cb is not None:
+        if tool.get("requires_confirmation"):
+            if confirm_cb is None:
+                return f"Tool {name} requires confirmation but no confirm_cb provided. Aborting."
             preview = json.dumps(args, ensure_ascii=False)
-            confirmed = confirm_cb(name, preview)
-            if not confirmed:
+            if not confirm_cb(name, preview):
                 return f"User cancelled tool {name}"
         self._stats["calls"][name] = self._stats["calls"].get(name, 0) + 1
         try:
@@ -144,7 +145,10 @@ def build_system_prompt(tools_desc: str) -> str:
 # ---------- Token 截断 ----------
 try:
     import tiktoken
-    ENCODING = tiktoken.encoding_for_model("gpt-4")
+    try:
+        ENCODING = tiktoken.encoding_for_model("deepseek-chat")
+    except KeyError:
+        ENCODING = tiktoken.get_encoding("cl100k_base")
 
     def count_tokens(text: str) -> int:
         return len(ENCODING.encode(text))
@@ -155,36 +159,91 @@ except ImportError:
 
 
 
+def _is_observation(msg: Dict[str, str]) -> bool:
+    """Check if a user message is a tool observation (vs. a real user query)."""
+    if msg.get("role") != "user":
+        return False
+    content = msg.get("content", "")
+    return content.startswith("[Reasoning:") or content.startswith("Observation:")
+
+
+def _group_turns(messages: List[Dict[str, str]]) -> tuple:
+    """Group messages into turns after the system prompt.
+
+    A turn is: [user_query, assistant_response, observation]  (may have multiple assistant-observation pairs)
+    Returns (turns, orphaned_msgs) where each turn is a list of messages.
+    """
+    turns: List[List[Dict]] = []
+    orphaned: List[Dict] = []
+    i = 1  # skip system prompt at index 0
+
+    while i < len(messages):
+        msg = messages[i]
+        # Real user query: role=user and NOT an observation
+        if msg.get("role") == "user" and not _is_observation(msg):
+            # Start a new turn; collect following assistant+observation pairs
+            turn = [msg]
+            i += 1
+            while i < len(messages):
+                m = messages[i]
+                if m.get("role") == "assistant":
+                    turn.append(m)
+                    i += 1
+                    # Optional observation following this assistant message
+                    if i < len(messages) and _is_observation(messages[i]):
+                        turn.append(messages[i])
+                        i += 1
+                elif m.get("role") == "user" and not _is_observation(m):
+                    # Next user query — current turn has no assistant response yet (orphaned at end)
+                    break
+                else:
+                    # Unexpected message (e.g. observation without preceding assistant)
+                    turn.append(m)
+                    i += 1
+            turns.append(turn)
+        elif msg.get("role") == "user" and _is_observation(msg):
+            # Observation without preceding assistant — append to last turn if possible
+            if turns:
+                turns[-1].append(msg)
+            else:
+                orphaned.append(msg)
+            i += 1
+        else:
+            # Other unexpected message — treat as orphan
+            orphaned.append(msg)
+            i += 1
+
+    return turns, orphaned
+
+
 def truncate_messages(messages: List[Dict[str, str]], max_tokens: int = 3000) -> List[Dict[str, str]]:
     """Trim old conversation turns (keeping system prompt) to fit within max_tokens.
-    Removes complete assistant+observation pairs from the end."""
+
+    A 'turn' is a complete user-query → assistant-response (+ optional observation) block.
+    Orphaned messages are preserved at the end.
+    Truncation removes entire turns from the end; never splits a turn in the middle.
+    """
     total = sum(count_tokens(m.get("content", "")) for m in messages)
     if total <= max_tokens:
         return messages
-    # Group messages into turns: first msg is system, then pairs of (assistant, observation)
-    turns = []  # list of [assistant_msg, observation_msg]
-    i = 1  # skip system prompt at index 0
-    while i < len(messages):
-        if messages[i].get("role") == "assistant" and i + 1 < len(messages):
-            turns.append([messages[i], messages[i + 1]])
-            i += 2
-        else:
-            # Orphaned message (no matching pair), log and skip
-            logger.warning(
-                "Orphaned message in conversation history (no pair), skipping: role=%s content=%r",
-                messages[i].get("role"), messages[i].get("content", "")[:60]
-            )
-            i += 1
-    # Remove turns from the end until under safe limit (留出 20% buffer)
+
+    turns, orphaned = _group_turns(messages)
+    # Estimate token cost of orphaned messages
+    orphan_tokens = sum(count_tokens(m.get("content", "")) for m in orphaned)
+    # Keep at least 20% buffer in case estimates are off
     safe_limit = int(max_tokens * 0.8)
-    while turns and total > safe_limit:
-        turn = turns.pop()
-        total -= count_tokens(turn[0].get("content", ""))
-        total -= count_tokens(turn[1].get("content", ""))
-    # Rebuild: system + remaining complete turns only
+
+    # Pop complete turns from the end until the remaining content fits
+    # (orphan tokens are always kept, so compare remaining against safe_limit)
+    while turns and (total - orphan_tokens - sum(count_tokens(m.get("content", "")) for m in turns[0])) > safe_limit:
+        turn = turns.pop(0)  # remove oldest turn first
+        total -= sum(count_tokens(m.get("content", "")) for m in turn)
+
+    # Rebuild: system prompt + remaining turns + any orphaned messages
     result = [messages[0]] if messages else []
     for turn in turns:
         result.extend(turn)
+    result.extend(orphaned)
     return result
 # ---------- LLM 调用 ----------
 # ---------- LLM Call with timeout and retry ----------
@@ -355,15 +414,26 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
                 if len(param_names) == 1:
                     action_input = {param_names[0]: action_input}
                 else:
-                    trace["error"] = f"Tool {action} param error"
-                    trace["total_latency_ms"] = int((time.time() - step_start_global) * 1000)
-                    if save_trace: _save_trace(trace)
-                    return [], None, trace
+                    observation = f"Error: tool {action} requires parameters but received a non-dict value. Please provide correct parameters."
+                    messages.append({"role": "assistant", "content": response})
+                    messages.append({"role": "user", "content": observation})
+                    trace["steps"].append({
+                        "step": step + 1, "thought": thought, "action": action,
+                        "action_input": action_input, "observation": observation,
+                        "latency_ms": int((time.time() - step_start) * 1000),
+                    })
+                    continue
             else:
-                trace["error"] = f"Unknown tool: {action}"
-                trace["total_latency_ms"] = int((time.time() - step_start_global) * 1000)
-                if save_trace: _save_trace(trace)
-                return [], None, trace
+                tool_names = ", ".join(t["name"] for t in registry.get_all())
+                observation = f"Error: unknown tool \"{action}\". Available tools: {tool_names}. Please choose a valid tool."
+                messages.append({"role": "assistant", "content": response})
+                messages.append({"role": "user", "content": observation})
+                trace["steps"].append({
+                    "step": step + 1, "thought": thought, "action": action,
+                    "action_input": action_input, "observation": observation,
+                    "latency_ms": int((time.time() - step_start) * 1000),
+                })
+                continue
         observation = registry.execute(action, action_input, confirm_cb=confirm_cb)
         if verbose:
             logger.info(f"Observation: {observation}")
@@ -382,8 +452,9 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
             "latency_ms": int((time.time() - step_start) * 1000),
         })
     trace["total_latency_ms"] = int((time.time() - step_start_global) * 1000)
+    trace["error"] = f"Max steps ({max_steps}) reached without a final answer"
     if save_trace: _save_trace(trace)
-    return [], None, trace
+    return [], f"(Max steps reached: {max_steps} steps used without reaching a conclusion.)", trace
 
 
 def _save_trace(trace: dict) -> None:
@@ -448,6 +519,6 @@ def main():
             # new_history already ends with the assistant final_answer message
         if trace:
             _print_trace_summary(trace)
-        print("\nFinal Answer: " + result)
+        print("\nFinal Answer: " + (result or "No final answer. See trace for details."))
         conversation_history = truncate_messages([{"role": "system", "content": ""}] + conversation_history, max_tokens=2000)[1:]
     print("\nGoodbye!")

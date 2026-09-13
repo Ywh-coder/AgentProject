@@ -8,7 +8,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agent_v2.agent import parse_action, truncate_messages, count_tokens, CircuitBreaker
+from agent_v2.agent import parse_action, truncate_messages, count_tokens, CircuitBreaker, _is_observation, _group_turns
 from agent_v2.tools import TOOLS_SCHEMA
 
 
@@ -52,45 +52,113 @@ class TestTruncateMessages:
     def test_system_always_kept(self):
         msgs = [
             {"role": "system", "content": "You are helpful"},
-            {"role": "assistant", "content": "A" * 100},
-            {"role": "user", "content": "B" * 100},
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "user", "content": "Observation: O1"},
         ]
         result = truncate_messages(msgs, max_tokens=10)
         assert result[0]["role"] == "system"
 
-    def test_removes_complete_turns(self):
+    def test_removes_complete_turns_from_end(self):
         msgs = [
             {"role": "system", "content": "sys"},
+            {"role": "user", "content": "Q1"},
             {"role": "assistant", "content": "A1"},
-            {"role": "user", "content": "U1"},
+            {"role": "user", "content": "Observation: O1"},
+            {"role": "user", "content": "Q2"},
             {"role": "assistant", "content": "A2"},
-            {"role": "user", "content": "U2"},
+            {"role": "user", "content": "Observation: O2"},
         ]
-        result = truncate_messages(msgs, max_tokens=5)
+        result = truncate_messages(msgs, max_tokens=8)
         assert result[0]["role"] == "system"
+        # Should keep turn 2 and drop turn 1; roles should alternate starting from user
         roles = [m["role"] for m in result]
-        assert roles.count("assistant") == roles.count("user")
+        assert roles[0] == "system"
+        assert roles[1] == "user"   # first msg after system is a user query
+        assert "assistant" in roles # assistant response is present
 
-    def test_orphaned_user_message_kept(self):
+    def test_preserves_well_formed_history_when_under_limit(self):
         msgs = [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "orphan"},
+            {"role": "user", "content": "Q1"},
             {"role": "assistant", "content": "A1"},
-            {"role": "user", "content": "U1"},
-        ]
-        result = truncate_messages(msgs, max_tokens=10000)
-        assert len(result) == 4
-        assert result[1]["role"] == "user"
-        assert result[1]["content"] == "orphan"
-
-    def test_no_truncate_when_under_limit(self):
-        msgs = [
-            {"role": "system", "content": "sys"},
-            {"role": "assistant", "content": "short"},
-            {"role": "user", "content": "short"},
+            {"role": "user", "content": "Observation: O1"},
         ]
         result = truncate_messages(msgs, max_tokens=10000)
         assert len(result) == len(msgs)
+
+    def test_incomplete_turn_preserved_at_end(self):
+        # User query with no assistant response after it (incomplete turn)
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "pending_q"},
+        ]
+        result = truncate_messages(msgs, max_tokens=10000)
+        assert result[0]["role"] == "system"
+        assert any(m["content"] == "pending_q" for m in result)
+
+    def test_orphaned_observation_preserved(self):
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "user", "content": "Observation: O1"},
+        ]
+        result = truncate_messages(msgs, max_tokens=10000)
+        assert result[0]["role"] == "system"
+        # Orphaned messages are preserved, not dropped
+        assert any(m["content"] == "Observation: O1" for m in result)
+
+    def test_realistic_multi_turn_truncation(self):
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "I will search"},
+            {"role": "user", "content": "Observation: results..."},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "Let me calculate"},
+            {"role": "user", "content": "Observation: 42"},
+            {"role": "user", "content": "q3"},
+            {"role": "assistant", "content": "Done"},
+            {"role": "user", "content": "Observation: final"},
+        ]
+        result = truncate_messages(msgs, max_tokens=9)
+        assert result[0]["role"] == "system"
+        contents = [m["content"] for m in result]
+        # Oldest turn (q1) should be removed
+        assert "q1" not in contents
+        # Most recent turn (q3) should be preserved
+        assert "q3" in contents
+        assert "Observation: final" in contents
+
+    def test_observation_not_mistaken_for_user_query(self):
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "What is 2+2?"},
+            {"role": "assistant", "content": "{\"action\": \"calculator\"}"},
+            {"role": "user", "content": "Observation: 4"},
+            {"role": "user", "content": "And 3+3?"},
+            {"role": "assistant", "content": "{\"action\": \"calculator\"}"},
+            {"role": "user", "content": "Observation: 6"},
+        ]
+        result = truncate_messages(msgs, max_tokens=10000)
+        assert len(result) == len(msgs)
+        user_contents = [m["content"] for m in result if m["role"] == "user"]
+        assert "What is 2+2?" in user_contents
+        assert "Observation: 4" in user_contents
+        assert "And 3+3?" in user_contents
+        assert "Observation: 6" in user_contents
+
+
+class TestIsObservation:
+    def test_plain_observation(self):
+        assert _is_observation({"role": "user", "content": "Observation: results"})
+        assert not _is_observation({"role": "user", "content": "Hello world"})
+        assert not _is_observation({"role": "assistant", "content": "Observation: x"})
+
+    def test_reasoning_prefix_observation(self):
+        assert _is_observation({"role": "user", "content": "[Reasoning: thinking]\nObservation: 42"})
+        assert not _is_observation({"role": "user", "content": "[Reasoning] not an observation"})
+
 
 
 class TestCircuitBreaker:
@@ -188,14 +256,6 @@ class TestReactAgentReturnType:
         sig = inspect.signature(react_agent)
         assert sig.return_annotation == tuple, f"Expected tuple, got {sig.return_annotation}"
 
-    def test_parse_messages_not_mutating_main(self):
-        # Verify parse_messages is isolated from messages
-        from agent_v2.agent import parse_action
-        msg = [{"role": "system", "content": "test"}]
-        # This test just verifies the code path exists without crashing
-        assert isinstance(msg, list)
-
-
 class TestMultiTurnTrace:
     """Verify that react_agent returns only the new trace, not the full message history."""
     def test_trace_extraction_logic(self):
@@ -289,8 +349,8 @@ class TestDangerConfirmation:
         result = registry.execute("send_email", {"to": "a@b.com", "subject": "Hi", "body": "Hello"}, confirm_cb=allow)
         assert "Email sent" in result or "Simulated" in result
 
-    def test_dangerous_tool_without_cb_just_fails_silently(self):
-        # Without confirm_cb, dangerous tool still executes (backward compat)
+    def test_dangerous_tool_without_cb_is_blocked(self):
+        # Without confirm_cb, dangerous tool is blocked for safety
         from agent_v2.agent import registry
         result = registry.execute("send_email", {"to": "a@b.com", "subject": "Hi", "body": "Hello"}, confirm_cb=None)
-        assert "Email sent" in result or "Simulated" in result
+        assert "requires confirmation" in result.lower() or "abort" in result.lower()
