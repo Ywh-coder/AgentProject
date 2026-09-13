@@ -71,6 +71,18 @@ class TestTruncateMessages:
         roles = [m["role"] for m in result]
         assert roles.count("assistant") == roles.count("user")
 
+    def test_orphaned_user_message_kept(self):
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "orphan"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "user", "content": "U1"},
+        ]
+        result = truncate_messages(msgs, max_tokens=10000)
+        assert len(result) == 4
+        assert result[1]["role"] == "user"
+        assert result[1]["content"] == "orphan"
+
     def test_no_truncate_when_under_limit(self):
         msgs = [
             {"role": "system", "content": "sys"},

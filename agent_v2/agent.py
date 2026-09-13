@@ -169,7 +169,11 @@ def truncate_messages(messages: List[Dict[str, str]], max_tokens: int = 3000) ->
             turns.append([messages[i], messages[i + 1]])
             i += 2
         else:
-            # Orphaned message (no matching pair), skip it
+            # Orphaned message (no matching pair), log and skip
+            logger.warning(
+                "Orphaned message in conversation history (no pair), skipping: role=%s content=%r",
+                messages[i].get("role"), messages[i].get("content", "")[:60]
+            )
             i += 1
     # Remove turns from the end until under safe limit (留出 20% buffer)
     safe_limit = int(max_tokens * 0.8)
