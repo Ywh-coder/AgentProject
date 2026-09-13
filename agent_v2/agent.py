@@ -347,7 +347,7 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
         if not isinstance(action_input, dict):
             tool_info = next((t for t in registry.get_all() if t["name"] == action), None)
             if tool_info:
-                param_names = list(tool_info["parameters"].keys())
+                param_names = list(tool_info["parameters"].get("properties", {}).keys())
                 if len(param_names) == 1:
                     action_input = {param_names[0]: action_input}
                 else:
