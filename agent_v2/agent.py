@@ -441,7 +441,7 @@ def main():
         if new_history is not None and result is not None:
             conversation_history.append({"role": "user", "content": user_input})
             conversation_history.extend(new_history)
-            conversation_history.append({"role": "assistant", "content": result})
+            # new_history already ends with the assistant final_answer message
         if trace:
             _print_trace_summary(trace)
         print("\nFinal Answer: " + result)
