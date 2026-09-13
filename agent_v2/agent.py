@@ -247,7 +247,7 @@ def parse_action(text: str) -> tuple:
         return "final", final_answer
     raise ValueError("JSON missing action or final_answer field")
 # ---------- ReAct Loop with multi-turn support ----------
-def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3, verbose: bool = True, conversation_history: Optional[List[Dict]] = None, confirm_cb=None) -> tuple:
+def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3, verbose: bool = True, conversation_history: Optional[List[Dict]] = None, confirm_cb=None, save_trace: bool = False) -> tuple:
     """Returns (new_trace, final_answer).
     new_trace contains ONLY the assistant+observation pairs from THIS turn
     (without system prompt and without the original user_query).
@@ -282,7 +282,7 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
         if not response:
             trace["error"] = "LLM call failed"
             trace["total_latency_ms"] = int((time.time() - step_start_global) * 1000)
-            _save_trace(trace)
+            if save_trace: _save_trace(trace)
             return [], None, trace
         if verbose:
             logger.info(f"Model response: {response}")
@@ -314,13 +314,13 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
                 if not response:
                     trace["error"] = "LLM call failed during retry"
                     trace["total_latency_ms"] = int((time.time() - step_start_global) * 1000)
-                    _save_trace(trace)
+                    if save_trace: _save_trace(trace)
                     return [], None, trace
                 continue
         if not parse_ok:
             trace["error"] = "Parse retry exhausted"
             trace["total_latency_ms"] = int((time.time() - step_start_global) * 1000)
-            _save_trace(trace)
+            if save_trace: _save_trace(trace)
             return [], None, trace
         if verbose:
             logger.info(f"Action: {action}, Input: {action_input}, Thought: {thought}")
@@ -346,7 +346,7 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
             trace["final_answer"] = final_answer
             trace["success"] = True
             trace["total_latency_ms"] = int((time.time() - step_start_global) * 1000)
-            _save_trace(trace)
+            if save_trace: _save_trace(trace)
             return new_history, final_answer, trace
         if not isinstance(action_input, dict):
             tool_info = next((t for t in registry.get_all() if t["name"] == action), None)
@@ -357,12 +357,12 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
                 else:
                     trace["error"] = f"Tool {action} param error"
                     trace["total_latency_ms"] = int((time.time() - step_start_global) * 1000)
-                    _save_trace(trace)
+                    if save_trace: _save_trace(trace)
                     return [], None, trace
             else:
                 trace["error"] = f"Unknown tool: {action}"
                 trace["total_latency_ms"] = int((time.time() - step_start_global) * 1000)
-                _save_trace(trace)
+                if save_trace: _save_trace(trace)
                 return [], None, trace
         observation = registry.execute(action, action_input, confirm_cb=confirm_cb)
         if verbose:
@@ -382,7 +382,7 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
             "latency_ms": int((time.time() - step_start) * 1000),
         })
     trace["total_latency_ms"] = int((time.time() - step_start_global) * 1000)
-    _save_trace(trace)
+    if save_trace: _save_trace(trace)
     return [], None, trace
 
 
@@ -441,7 +441,7 @@ def main():
             print(f"   Args: {args_preview}")
             ans = input("   Confirm? (y/n): ").strip().lower()
             return ans == "y"
-        new_history, result, trace = react_agent(user_input, verbose=True, conversation_history=conversation_history, confirm_cb=_confirm)
+        new_history, result, trace = react_agent(user_input, verbose=True, conversation_history=conversation_history, confirm_cb=_confirm, save_trace=True)
         if new_history is not None and result is not None:
             conversation_history.append({"role": "user", "content": user_input})
             conversation_history.extend(new_history)
