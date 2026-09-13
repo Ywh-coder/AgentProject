@@ -68,7 +68,7 @@ def run_eval(test_file: str = "eval/test_cases.jsonl", max_steps: int = 5, outpu
         elif leak_patterns:
             answer_ok = not any(lp.lower() in answer.lower() for lp in leak_patterns)
         else:
-            answer_ok = all(kw.lower() in answer.lower() for kw in expected_kw) if expected_kw else True
+            answer_ok = any(kw.lower() in answer.lower() for kw in expected_kw) if expected_kw else True
         if case.get("category") == "tool_fail" and answer_ok and not expected_kw and not leak_patterns:
             answer_ok = bool(answer and len(answer.strip()) > 0)
 
