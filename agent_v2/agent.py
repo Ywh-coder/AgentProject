@@ -37,10 +37,10 @@ from .tools import calculator, web_search, send_email, TOOLS_SCHEMA
 
 
 
-_TOOL_MAX_FAILURES = 3
+DEFAULT_MAX_FAILURES = 3
 # ---------- Circuit Breaker ----------
 class CircuitBreaker:
-    def __init__(self, max_failures=_TOOL_MAX_FAILURES):
+    def __init__(self, max_failures=DEFAULT_MAX_FAILURES):
         self._failures: Dict[str, int] = {}
         self._max = max_failures
     def is_open(self, name: str) -> bool:
