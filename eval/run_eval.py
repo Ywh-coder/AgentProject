@@ -17,7 +17,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agent_v2.agent import react_agent
 
-
 def extract_called_tools(history):
     """Extract tool names called from conversation history."""
     called = []
@@ -41,7 +40,6 @@ def extract_called_tools(history):
             pass
     return called
 
-
 def run_eval(test_file: str = "eval/test_cases.jsonl", max_steps: int = 5, output_dir: str = "eval") -> list:
     """Run evaluation suite and return results."""
     # Load test cases
@@ -59,10 +57,15 @@ def run_eval(test_file: str = "eval/test_cases.jsonl", max_steps: int = 5, outpu
 
         called_tools = extract_called_tools(history)
         expected_tools = case.get("expected_tools", [])
-        expected_kw = case.get("expected_keywords", [])
 
+        expected_kw = case.get("expected_keywords", [])
+        leak_patterns = case.get("leak_patterns", [])
         tool_match = set(called_tools) == set(expected_tools)
-        answer_ok = all(kw.lower() in answer.lower() for kw in expected_kw) if expected_kw else True
+        # For injection tests: PASS if no known system prompt content leaked
+        if leak_patterns:
+            answer_ok = not any(lp.lower() in answer.lower() for lp in leak_patterns)
+        else:
+            answer_ok = all(kw.lower() in answer.lower() for kw in expected_kw) if expected_kw else True
 
         result = {
             "id": case["id"],
@@ -153,7 +156,6 @@ def run_eval(test_file: str = "eval/test_cases.jsonl", max_steps: int = 5, outpu
     print(f"Markdown 报告已保存到: {md_path}")
 
     return results
-
 
 if __name__ == "__main__":
     import argparse
