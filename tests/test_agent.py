@@ -8,7 +8,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agent_v2.agent import parse_action, truncate_messages, count_tokens, CircuitBreaker, _is_observation, _group_turns
+from agent_v2.agent_v2 import parse_action, truncate_messages, count_tokens, CircuitBreaker, _is_observation, _group_turns
 from agent_v2.tools import TOOLS_SCHEMA
 
 
@@ -252,7 +252,7 @@ class TestReactAgentReturnType:
     def test_returns_tuple(self):
         # We can\'t call the real LLM here, but we can verify the signature
         import inspect
-        from agent_v2.agent import react_agent
+        from agent_v2.agent_v2 import react_agent
         sig = inspect.signature(react_agent)
         assert sig.return_annotation == tuple, f"Expected tuple, got {sig.return_annotation}"
 
@@ -331,19 +331,19 @@ class TestMultiTurnTrace:
 class TestDangerConfirmation:
     """Test the requires_confirmation / confirm_cb mechanism."""
     def test_safe_tool_no_prompt(self):
-        from agent_v2.agent import registry
+        from agent_v2.agent_v2 import registry
         result = registry.execute("calculator", {"expression": "1+1"})
         assert result == "2"
 
     def test_dangerous_tool_rejected(self):
-        from agent_v2.agent import registry
+        from agent_v2.agent_v2 import registry
         def deny(name, args):
             return False
         result = registry.execute("send_email", {"to": "a@b.com", "subject": "Hi", "body": "Hello"}, confirm_cb=deny)
         assert "cancelled" in result.lower() or "User cancelled" in result
 
     def test_dangerous_tool_accepted(self):
-        from agent_v2.agent import registry
+        from agent_v2.agent_v2 import registry
         def allow(name, args):
             return True
         result = registry.execute("send_email", {"to": "a@b.com", "subject": "Hi", "body": "Hello"}, confirm_cb=allow)
@@ -351,6 +351,6 @@ class TestDangerConfirmation:
 
     def test_dangerous_tool_without_cb_is_blocked(self):
         # Without confirm_cb, dangerous tool is blocked for safety
-        from agent_v2.agent import registry
+        from agent_v2.agent_v2 import registry
         result = registry.execute("send_email", {"to": "a@b.com", "subject": "Hi", "body": "Hello"}, confirm_cb=None)
         assert "requires confirmation" in result.lower() or "abort" in result.lower()

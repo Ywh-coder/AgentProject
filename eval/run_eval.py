@@ -15,7 +15,7 @@ from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agent_v2.agent import react_agent
+from agent_v2.agent_v2 import react_agent
 
 def extract_called_tools(history):
     """Extract tool names called from conversation history."""
