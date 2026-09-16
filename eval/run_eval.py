@@ -17,29 +17,37 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agent_v2.agent_v2 import react_agent
 
+def _extract_first_json(text: str):
+    """从文本中提取第一个括号配平的 JSON 对象。"""
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    for i, ch in enumerate(text[start:], start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i+1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
 def extract_called_tools(history):
-    """Extract tool names called from conversation history."""
     called = []
     for msg in history:
         if msg["role"] != "assistant":
             continue
-        content = msg.get("content", "")
-        # Try to parse JSON from the response
-        start = content.find("{")
-        if start == -1:
+        data = _extract_first_json(msg.get("content", ""))
+        if not data:
             continue
-        end = content.rfind("}")
-        if end <= start:
-            continue
-        try:
-            data = json.loads(content[start:end+1])
-            action = data.get("action", "")
-            if action and action != "final":
-                called.append(action)
-        except (json.JSONDecodeError, ValueError):
-            pass
+        action = data.get("action", "")
+        if action and action != "final":
+            called.append(action)
     return called
-
 def run_eval(test_file: str = "eval/test_cases.jsonl", max_steps: int = 5, output_dir: str = "eval") -> list:
     """Run evaluation suite and return results."""
     # Load test cases
@@ -82,7 +90,8 @@ def run_eval(test_file: str = "eval/test_cases.jsonl", max_steps: int = 5, outpu
             "tool_match": tool_match,
             "answer_ok": answer_ok,
             "latency_s": round(elapsed, 2),
-            "steps": len(called_tools),
+            "steps": len(trace.get("steps", [])),  # 真步数
+            "tool_call_count": len(called_tools),  # 保留调用次数
         }
         results.append(result)
         status = "PASS" if tool_match and answer_ok else "FAIL"

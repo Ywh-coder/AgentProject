@@ -15,20 +15,20 @@ from agent_v2.tools import TOOLS_SCHEMA
 class TestParseAction:
     def test_valid_action(self):
         text = json.dumps({"thought": "I need to calculate", "action": "calculator", "action_input": {"expression": "2+2"}})
-        action, action_input = parse_action(text)
+        action, action_input, thought = parse_action(text)
         assert action == "calculator"
         assert action_input == {"expression": "2+2"}
 
     def test_final_answer(self):
         text = json.dumps({"thought": "done", "final_answer": "42"})
-        action, action_input = parse_action(text)
+        action, action_input, thought = parse_action(text)
         assert action == "final"
         assert action_input == "42"
 
     def test_with_code_fence(self):
         inner = json.dumps({"thought": "x", "action": "web_search", "action_input": {"query": "test"}})
         text = "```json\n" + inner + "\n```"
-        action, action_input = parse_action(text)
+        action, action_input, thought = parse_action(text)
         assert action == "web_search"
         assert action_input == {"query": "test"}
 
@@ -242,19 +242,20 @@ class TestToolsSchema:
         assert "examples" in params["properties"]["body"]
 
 
-if __name__ == "__main__":
-    import pytest
-    pytest.main([__file__, "-v"])
 
 
 class TestReactAgentReturnType:
-    """Test that react_agent returns (messages, result) tuple."""
-    def test_returns_tuple(self):
-        # We can\'t call the real LLM here, but we can verify the signature
-        import inspect
-        from agent_v2.agent_v2 import react_agent
-        sig = inspect.signature(react_agent)
-        assert sig.return_annotation == tuple, f"Expected tuple, got {sig.return_annotation}"
+    def test_returns_three_tuple_on_final(self, monkeypatch):
+        from agent_v2 import agent_v2
+        monkeypatch.setattr(
+            agent_v2, "call_llm",
+            lambda *a, **k: '{"thought":"done","final_answer":"42"}',
+        )
+        history, answer, trace = agent_v2.react_agent("hi", verbose=False)
+        assert isinstance(history, list)
+        assert answer == "42"
+        assert isinstance(trace, dict)
+        assert trace["success"] is True
 
 class TestMultiTurnTrace:
     """Verify that react_agent returns only the new trace, not the full message history."""
@@ -354,3 +355,7 @@ class TestDangerConfirmation:
         from agent_v2.agent_v2 import registry
         result = registry.execute("send_email", {"to": "a@b.com", "subject": "Hi", "body": "Hello"}, confirm_cb=None)
         assert "requires confirmation" in result.lower() or "abort" in result.lower()
+
+if __name__ == "__main__":
+    import pytest
+    pytest.main([__file__, "-v"])

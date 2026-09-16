@@ -162,7 +162,7 @@ def web_search(query: str) -> str:
                 body = r.get('body', '')
                 if len(body) > 200: body = body[:200] + '...'
                 formatted.append(f'{title}: {body}')
-            return "\n".join(formatted)
+            return wrap_untrusted("\n".join(formatted))
         return wrap_untrusted('DuckDuckGo returned no results.')
     except Exception as e:
         logger.error(f'DuckDuckGo also failed: {e}')

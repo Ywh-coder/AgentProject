@@ -7,7 +7,11 @@ from typing import Dict, Any, List, Optional, Callable
 import locale
 import time
 import uuid
-
+from openai import (
+    APIError, APITimeoutError, RateLimitError,
+    AuthenticationError, BadRequestError, APIConnectionError,
+    OpenAI
+)
 # ---------- 环境与日志配置 ----------
 try:
     locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
@@ -23,16 +27,21 @@ logger = logging.getLogger("ReActAgent")
 from dotenv import load_dotenv
 load_dotenv()
 
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-if not DEEPSEEK_API_KEY:
-    raise RuntimeError("环境变量 DEEPSEEK_API_KEY 未设置，请在 .env 文件中配置。")
 
-from openai import OpenAI
-client = OpenAI(
-    api_key=DEEPSEEK_API_KEY,
-    base_url="https://api.deepseek.com/v1",
-)
+_client: Optional[OpenAI] = None
 
+def get_client() -> OpenAI:
+    """延迟创建 OpenAI 客户端，避免导入时因缺少 API Key 崩溃。"""
+    global _client
+    if _client is None:
+        api_key = os.getenv("DEEPSEEK_API_KEY")
+        if not api_key:
+            raise RuntimeError("环境变量 DEEPSEEK_API_KEY 未设置，请在 .env 文件中配置。")
+        _client = OpenAI(
+            api_key=api_key,
+            base_url="https://api.deepseek.com/v1",
+        )
+    return _client
 from .tools import calculator, web_search, send_email, TOOLS_SCHEMA
 
 
@@ -40,18 +49,49 @@ from .tools import calculator, web_search, send_email, TOOLS_SCHEMA
 DEFAULT_MAX_FAILURES = 3
 # ---------- Circuit Breaker ----------
 class CircuitBreaker:
-    def __init__(self, max_failures=DEFAULT_MAX_FAILURES):
+    """连续失败达到阈值后熔断，冷却期结束后自动半开重试。"""
+
+    def __init__(self, max_failures: int = DEFAULT_MAX_FAILURES, cooldown_s: float = 60.0):
         self._failures: Dict[str, int] = {}
+        self._open_until: Dict[str, float] = {}
         self._max = max_failures
+        self._cooldown = cooldown_s
+
     def is_open(self, name: str) -> bool:
-        return self._failures.get(name, 0) >= self._max
+        until = self._open_until.get(name, 0.0)
+        if until and time.time() >= until:
+            # 冷却结束，半开：清空计数，允许一次尝试
+            self._open_until.pop(name, None)
+            self._failures.pop(name, None)
+            return False
+        return until > time.time()
+
     def record(self, name: str) -> None:
-        self._failures[name] = self._failures.get(name, 0) + 1
+        n = self._failures.get(name, 0) + 1
+        self._failures[name] = n
+        if n >= self._max:
+            self._open_until[name] = time.time() + self._cooldown
+
     def reset(self, name: str) -> None:
         self._failures.pop(name, None)
-    def get_stats(self) -> Dict[str, Dict]:
-        return {name: {"failure_count": count, "circuit_open": count >= self._max} for name, count in self._failures.items()}
+        self._open_until.pop(name, None)
 
+    def reset_all(self) -> None:
+        self._failures.clear()
+        self._open_until.clear()
+
+    def _peek_open(self, name: str) -> bool:
+        """只读查询，不修改状态。"""
+        return self._open_until.get(name, 0.0) > time.time()
+
+    def get_stats(self) -> Dict[str, Dict]:
+        return {
+            name: {
+                "failure_count": self._failures.get(name, 0),
+                "circuit_open": self._peek_open(name),
+            }
+            for name in set(self._failures) | set(self._open_until)
+        }
 
 circuit_breaker = CircuitBreaker()
 
@@ -63,8 +103,18 @@ class ToolRegistry:
     def register(self, name: str, description: str, parameters: Dict[str, Any], requires_confirmation: bool = False):
         def decorator(func: Callable):
             self._tools[name] = {
-                "name": name, "description": description, "parameters": parameters,
-                "function": func, "requires_confirmation": requires_confirmation,
+                "name": name,
+                "description": description,
+                "parameters": parameters,
+                "function": func,
+                "requires_confirmation": requires_confirmation,
+                "strict": True,
+                "schema": {  # 保留原始 schema（含 strict/examples 等）
+                    "name": name,
+                    "description": description,
+                    "strict": True,
+                    "parameters": parameters,
+                },
             }
             return func
         return decorator
@@ -97,8 +147,10 @@ class ToolRegistry:
             circuit_breaker.record(name)
             logger.exception(f"Tool {name} execution failed")
             return f"Tool error [{name}]: {e}"
+
     def get_tools_json_schema(self) -> List[Dict]:
-        return TOOLS_SCHEMA
+        """从已注册的工具生成 schema，保证与注册表一致。"""
+        return [t["schema"] for t in self._tools.values()]
     def get_tools_text_description(self) -> str:
         """Format tool descriptions as human-readable text from JSON Schema."""
         result = []
@@ -118,10 +170,23 @@ class ToolRegistry:
         return "\n".join(result)
 
 registry = ToolRegistry()
-registry.register(name="calculator", description=TOOLS_SCHEMA[0]["description"], parameters=TOOLS_SCHEMA[0]["parameters"], requires_confirmation=False)(calculator)
-registry.register(name="web_search", description=TOOLS_SCHEMA[1]["description"], parameters=TOOLS_SCHEMA[1]["parameters"], requires_confirmation=False)(web_search)
-registry.register(name="send_email", description=TOOLS_SCHEMA[2]["description"], parameters=TOOLS_SCHEMA[2]["parameters"], requires_confirmation=True)(send_email)
 
+def _register_from_schema(func, requires_confirmation: bool = False) -> None:
+    """按函数名在 TOOLS_SCHEMA 中查找对应 schema 并注册。"""
+    name = func.__name__
+    schema = next((t for t in TOOLS_SCHEMA if t["name"] == name), None)
+    if schema is None:
+        raise ValueError(f"TOOLS_SCHEMA 中缺少 '{name}' 的定义")
+    registry.register(
+        name=name,
+        description=schema["description"],
+        parameters=schema["parameters"],
+        requires_confirmation=requires_confirmation,
+    )(func)
+
+_register_from_schema(calculator, requires_confirmation=False)
+_register_from_schema(web_search, requires_confirmation=False)
+_register_from_schema(send_email, requires_confirmation=True)
 # ---------- System Prompt ----------
 SYSTEM_PROMPT_TEMPLATE = """You are a helpful assistant that can use tools to answer questions.
 
@@ -235,10 +300,13 @@ def truncate_messages(messages: List[Dict[str, str]], max_tokens: int = 3000) ->
 
     # Pop complete turns from the end until the remaining content fits
     # (orphan tokens are always kept, so compare remaining against safe_limit)
-    while turns and (total - orphan_tokens - sum(count_tokens(m.get("content", "")) for m in turns[0])) > safe_limit:
-        turn = turns.pop(0)  # remove oldest turn first
-        total -= sum(count_tokens(m.get("content", "")) for m in turn)
-
+    while turns:
+        oldest = turns[0]
+        oldest_tokens = sum(count_tokens(m.get("content", "")) for m in oldest)
+        if total - oldest_tokens <= safe_limit:
+            break
+        turns.pop(0)
+        total -= oldest_tokens
     # Rebuild: system prompt + remaining turns + any orphaned messages
     result = [messages[0]] if messages else []
     for turn in turns:
@@ -248,41 +316,51 @@ def truncate_messages(messages: List[Dict[str, str]], max_tokens: int = 3000) ->
 # ---------- LLM 调用 ----------
 # ---------- LLM Call with timeout and retry ----------
 def call_llm(messages: List[Dict[str, str]], temperature: float = 0.0, max_retries: int = 3) -> Optional[str]:
+    NON_RETRYABLE = (AuthenticationError, BadRequestError)
+    last_err: Optional[Exception] = None
+
     for attempt in range(max_retries):
         try:
-            response = client.chat.completions.create(
+            response = get_client().chat.completions.create(
                 model="deepseek-chat",
                 messages=messages,
                 temperature=temperature,
                 timeout=30.0,
             )
             return response.choices[0].message.content
+        except NON_RETRYABLE as e:
+            logger.error(f"LLM non-retryable error: {e}")
+            return None
+        except RateLimitError as e:
+            wait = (2 ** attempt) * 2
+            last_err = e
+        except (APITimeoutError, APIConnectionError, APIError) as e:
+            wait = 2 ** attempt
+            last_err = e
         except Exception as e:
-            err_str = str(e)
-            if "401" in err_str or "400" in err_str or "invalid" in err_str.lower():
-                logger.error(f"LLM non-retryable error: {e}")
-                return None
-            if attempt < max_retries - 1:
-                wait = 2 ** attempt
-                logger.warning(f"LLM call failed (attempt {attempt+1}/{max_retries}): {e}, retrying in {wait}s")
-                time.sleep(wait)
-            else:
-                logger.error(f"LLM call failed after {max_retries} attempts: {e}")
-                return None
+            logger.error(f"LLM unexpected error: {e}")
+            return None
+
+        if attempt < max_retries - 1:
+            logger.warning(
+                f"LLM call failed (attempt {attempt+1}/{max_retries}): "
+                f"{last_err}, retry in {wait}s"
+            )
+            time.sleep(wait)
+        else:
+            logger.error(f"LLM call failed after {max_retries} attempts: {last_err}")
+    return None
 # ---------- 解析模型输出 ----------
 def parse_action(text: str) -> tuple:
-    """从模型输出中提取 action 和 action_input"""
+    """从模型输出中提取 (action, action_input, thought)。"""
     text = re.sub(r'`json\s*|`\s*', '', text).strip()
-
     start = text.find('{')
     if start == -1:
         raise ValueError("未找到 JSON 起始符 '{'")
 
-    brace_count = 0
-    end = start
+    brace_count, end = 0, start
     for i, ch in enumerate(text[start:], start):
-        if ch == '{':
-            brace_count += 1
+        if ch == '{':   brace_count += 1
         elif ch == '}':
             brace_count -= 1
             if brace_count == 0:
@@ -290,28 +368,25 @@ def parse_action(text: str) -> tuple:
                 break
     if end == start:
         raise ValueError("未找到匹配的 JSON 结束符 '}'")
-    json_str = text[start:end+1]
 
     try:
-        data = json.loads(json_str)
+        data = json.loads(text[start:end+1])
     except json.JSONDecodeError as e:
         raise ValueError(f"JSON 解析失败: {e}")
 
-    action = data.get("action")
-    action_input = data.get("action_input")
-    final_answer = data.get("final_answer")
-    if action is not None:
-        return action, action_input
-    elif final_answer is not None:
-        return "final", final_answer
+    thought = data.get("thought", "")
+    if "action" in data and data["action"] is not None:
+        return data["action"], data.get("action_input"), thought
+    if "final_answer" in data:
+        return "final", data["final_answer"], thought
     raise ValueError("JSON missing action or final_answer field")
 # ---------- ReAct Loop with multi-turn support ----------
 def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3, verbose: bool = True, conversation_history: Optional[List[Dict]] = None, confirm_cb=None, save_trace: bool = False) -> tuple:
-    """Returns (new_trace, final_answer).
-    new_trace contains ONLY the assistant+observation pairs from THIS turn
-    (without system prompt and without the original user_query).
-    Caller appends user_query + final_answer around the trace.
-    Caller is responsible for appending user_query and final_answer to history."""
+    """Returns (new_history, final_answer, trace).
+    new_history: list of assistant+observation messages added this turn.
+    final_answer: str or None.
+    trace: dict with full execution trace.
+    """
 
     # ---------- Trace ----------
     trace_id = str(uuid.uuid4())[:8]
@@ -346,18 +421,12 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
         if verbose:
             logger.info(f"Model response: {response}")
         # Extract thought from response
-        thought = ""
-        clean_text = re.sub(r"```json\s*|```\s*", "", response).strip()
-        start = clean_text.find("{")
-        if start != -1:
-            thought_match = re.search(r"\"thought\":\s*\"([^\"]+)\"", clean_text[start:])
-            if thought_match:
-                thought = thought_match.group(1)
+        thought = ""  # 由 parse_action 填充
         parse_ok = False
-        parse_messages = list(messages)  # snapshot for parse retries (isolated from main messages)
+        parse_messages = list(messages)
         for retry in range(max_parse_retries):
             try:
-                action, action_input = parse_action(response)
+                action, action_input, thought = parse_action(response)
                 parse_ok = True
                 break
             except Exception as e:
@@ -388,9 +457,6 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
             messages.append({"role": "assistant", "content": response})
             # Extract only the assistant+observation pairs added this turn.
             # messages = [system, ...prev_history, user_query, assistant1, obs1, ...]
-            n_prev = 1 + len(conversation_history) if conversation_history else 1
-            new_trace = messages[n_prev + 1:]  # skip user_query, start from assistant1
-            # Extract only the assistant+observation pairs added this turn.
             n_prev = 1 + len(conversation_history) if conversation_history else 1
             new_history = messages[n_prev + 1:]  # skip user_query
             trace["steps"].append({
@@ -497,6 +563,12 @@ def main():
         print(f"  - {tool['name']}: {tool['description']}")
     print(f"Tool stats: {circuit_breaker.get_stats()}")
     conversation_history = []
+
+    def _confirm(name: str, args_preview: str) -> bool:
+        print(f"\n\n \u26a0\ufe0f  Dangerous tool: {name}")
+        print(f"   Args: {args_preview}")
+        ans = input("   Confirm? (y/n): ").strip().lower()
+        return ans == "y"
     while True:
         try:
             user_input = input('\n\n>>> input prompt: ').strip()
@@ -507,11 +579,7 @@ def main():
             break
         if not user_input:
             continue
-        def _confirm(name: str, args_preview: str) -> bool:
-            print(f"\n\n \u26a0\ufe0f  Dangerous tool: {name}")
-            print(f"   Args: {args_preview}")
-            ans = input("   Confirm? (y/n): ").strip().lower()
-            return ans == "y"
+
         new_history, result, trace = react_agent(user_input, verbose=True, conversation_history=conversation_history, confirm_cb=_confirm, save_trace=True)
         if new_history is not None and result is not None:
             conversation_history.append({"role": "user", "content": user_input})
