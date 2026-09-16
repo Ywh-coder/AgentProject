@@ -280,7 +280,7 @@ registry.register(
 | v2.2 | 🟡 JSON 提取改括号配对 | 修复 rfind 在嵌套 JSON 时切错 |
 | v2.2 | 🟢 _confirm 提到循环外 | 冗余闭包清理 |
 
-## 公共 API：工具 Schema（OpenAI Function Calling 集成）：工具 Schema（OpenAI Function Calling 集成）
+## 公共 API：工具 Schema（OpenAI Function Calling 集成）
 
 ToolRegistry.get_tools_json_schema() 是对外公共 API，返回符合 OpenAI 格式的 tool schema 列表，供外部集成方以原生 unction_calling 方式驱动本注册表。
 
