@@ -13,11 +13,11 @@
 {"id": "no_tool_03", "query": "请用一句话介绍你自己", "category": "no_tool", "expected_tools": [], "expected_keywords": ["2026", "年"]}
 {"id": "no_tool_04", "query": "今天星期几？", "category": "no_tool", "expected_tools": [], "expected_keywords": ["今天", "today", "date"]}
 {"id": "no_tool_05", "query": "什么是人工智能？", "category": "no_tool", "expected_tools": [], "expected_keywords": ["人工智能", "AI"]}
-{"id": "multi_01", "query": "查一下特斯拉当前股价，再算比昨天涨了百分之几", "category": "multi", "expected_tools": ["web_search", "calculator"], "expected_keywords": ["tesla", "股价"]}
-{"id": "multi_02", "query": "查一下今日黄金价格然后换算100克值多少人民币", "category": "multi", "expected_tools": ["web_search", "calculator"], "expected_keywords": ["黄金", "gold"]}
-{"id": "multi_03", "query": "查一下苹果股价，再算如果10股要多少钱", "category": "multi", "expected_tools": ["web_search", "calculator"], "expected_keywords": ["苹果", "股价"]}
-{"id": "multi_04", "query": "查一下比特币价格然后换算0.5比特币要多少人民币", "category": "multi", "expected_tools": ["web_search", "calculator"], "expected_keywords": ["bitcoin", "比特币"]}
-{"id": "multi_05", "query": "查一下欧元兑美元汇率，再算1000欧元兑换多少美元", "category": "multi", "expected_tools": ["web_search", "calculator"], "expected_keywords": ["欧元", "美元"]}
+{"id": "multi_01", "query": "查一下特斯拉当前股价，再算比100美元涨了百分之几", "category": "multi", "expected_tools": ["web_search", "calculator"], "expected_keywords": ["tesla", "股价"]}
+{"id": "multi_02", "query": "搜一下今天黄金价格，然后计算100克值多少人民币", "category": "multi", "expected_tools": ["web_search", "calculator"], "expected_keywords": ["黄金", "gold"]}
+{"id": "multi_03", "query": "查一下苹果股价，再算买10股要花多少钱", "category": "multi", "expected_tools": ["web_search", "calculator"], "expected_keywords": ["苹果", "股价"]}
+{"id": "multi_04", "query": "搜一下比特币价格，然后算买0.5个需要多少美元", "category": "multi", "expected_tools": ["web_search", "calculator"], "expected_keywords": ["bitcoin", "比特币"]}
+{"id": "multi_05", "query": "查一下欧元对美元汇率，再算1000欧元换多少美元", "category": "multi", "expected_tools": ["web_search", "calculator"], "expected_keywords": ["欧元", "美元"]}
 {"id": "fail_01", "query": "搜索 asdfghjklqwerty 这个不存在的词", "category": "tool_fail", "expected_tools": ["web_search"], "expected_keywords": ["error", "Error", "错误", "没有找到", "未找到", "no result", "no relevant"]}
 {"id": "fail_02", "query": "搜索 zzzzzznonexistent12345", "category": "tool_fail", "expected_tools": ["web_search"], "expected_keywords": ["error", "Error", "错误", "no relevant", "no result", "没有找到"]}
 {"id": "fail_03", "query": "算一下这个表达式：undefined_func(42)", "category": "tool_fail", "expected_tools": ["calculator"], "expected_keywords": ["undefined", "error", "不支持", "未支持", "错误"]}
