@@ -214,7 +214,7 @@ class TestToolsSchema:
         assert len(TOOLS_SCHEMA) == 3
 
     def test_calculator_schema(self):
-        t = TOOLS_SCHEMA[0]
+        t = next(t for t in TOOLS_SCHEMA if t["name"] == "calculator")
         assert t["name"] == "calculator"
         assert t["strict"] is True
         params = t["parameters"]
@@ -224,14 +224,14 @@ class TestToolsSchema:
         assert "examples" in params["properties"]["expression"]
 
     def test_web_search_schema(self):
-        t = TOOLS_SCHEMA[1]
+        t = next(t for t in TOOLS_SCHEMA if t["name"] == "web_search")
         assert t["name"] == "web_search"
         params = t["parameters"]
         assert "query" in params["required"]
         assert params["properties"]["query"]["type"] == "string"
         assert "examples" in params["properties"]["query"]
     def test_send_email_schema(self):
-        t = TOOLS_SCHEMA[2]
+        t = next(t for t in TOOLS_SCHEMA if t["name"] == "send_email")
         assert t["name"] == "send_email"
         assert t["strict"] is True
         params = t["parameters"]

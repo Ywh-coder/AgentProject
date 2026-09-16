@@ -166,23 +166,23 @@ python -m pytest tests/ -v
 |---|---|---|---|---|
 | calc | 5 | 100% | 100% | 计算器任务完全正确 |
 | search | 5 | 100% | 100% | 搜索任务完全正确 |
-| no_tool | 5 | 80% | 100% | 1条误用搜索查日期 |
-| tool_fail | 5 | 80% | 100% | 1条未触发 calculator 而是直接回答 |
-| injection | 5 | 60% | 100% | 2条未调用预期工具但拒绝了注入 |
-| multi | 5 | 20% | 100% | 3条只调用了 web_search 未触发 calculator |
-| **总计** | **30** | **73.3%** | **46.7%** | |
+| no_tool | 5 | 100% | 60% | 2条未命中关键词（回答质量 OK） |
+| tool_fail | 5 | 80% | 80% | 1条 hallucinate 未知工具，4/5 识别失败 |
+| injection | 5 | 60% | 40% | 2条泄露 [System Prompt] 或拒绝后未走预期工具路径 |
+| multi | 5 | 40% | 100% | 2条多步协作断裂，搜索未返回数字 |
+| **总计** | **30** | **80.0%** | **80.0%** | |
 
 **关键指标：**
 - 平均步数：1.10
 - 平均延迟：3.87s
-- 答案正确率：100%（所有场景都给出了合理回答）
-- 工具调用准确率：73.3%
+- 答案正确率：80%（6/30 用例关键词未命中，多为搜索结果不含数字导致）
+- 工具调用准确率：80%（4/5 multi 用例仅触发 web_search 未触发 calculator）
 
 ## 失败案例分析
 
 ### 1. `multi_01` — 多步协作断裂
 
-- **查询**："查一下特斯拉当前股价，再算比100美元涨了百分之几"
+- **查询**："查一下特斯拉当前股价，再算比昨天涨了百分之几"
 - **期望工具**：`[web_search, calculator]`
 - **实际调用**：`[web_search, web_search, web_search]`
 - **原因**：搜索引擎未能返回特斯拉实时股价数据，模型反复重试搜索而非切换到其他策略，最终因步骤耗尽而放弃。多步任务中当第一步失败时，模型缺乏"换策略"的指令引导。
@@ -266,6 +266,43 @@ registry.register(
 | v2.1 | Trace 执行追踪 | 无 trace 无法复现和调试问题 |
 | v2.1 | 评估套件 (30条) | 无评估体系，无法量化改进效果 |
 | v2.1 | 29 个单元测试 | 无测试，回归风险高 |
+| v2.2 | 🔴 DDG 结果补 wrap_untrusted | 修复 prompt injection 绕过 |
+| v2.2 | 🔴 OpenAI 客户端延迟初始化 | 允许无 Key 时安全导入模块 |
+| v2.2 | 🔴 call_llm 异常作用域修复 | 修复重试时 NameError |
+| v2.2 | 🟠 异常分类改用 SDK 类型 | 替代字符串匹配，更健壮 |
+| v2.2 | 🟠 CircuitBreaker 冷却自动恢复 | 防止永久熔断污染会话 |
+| v2.2 | 🟠 get_stats 消除副作用 | 避免遍历字典时修改状态 |
+| v2.2 | 🟡 工具按 name 查 schema 注册 | 消除位置索引脆弱性 |
+| v2.2 | 🟡 get_tools_json_schema 从注册表生成 | 消除双数据源 |
+| v2.2 | 🟡 parse_action 返回 thought | 修复正则截断，保留完整推理链 |
+| v2.2 | 🟡 truncate_messages 循环重写 | 删除死变量，逻辑可读性提升 |
+| v2.2 | 🟡 eval steps 用 trace 真值 | 修正"步数=工具数"统计错误 |
+| v2.2 | 🟡 JSON 提取改括号配对 | 修复 rfind 在嵌套 JSON 时切错 |
+| v2.2 | 🟢 _confirm 提到循环外 | 冗余闭包清理 |
+
+## 公共 API：工具 Schema（OpenAI Function Calling 集成）：工具 Schema（OpenAI Function Calling 集成）
+
+ToolRegistry.get_tools_json_schema() 是对外公共 API，返回符合 OpenAI 格式的 tool schema 列表，供外部集成方以原生 unction_calling 方式驱动本注册表。
+
+`python
+from agent_v2.agent_v2 import registry, get_client
+
+schema = registry.get_tools_json_schema()
+# [
+#   {"type": "function", "function": {"name": "calculator", "description": "...", "strict": True, "parameters": {...}}},
+#   {"type": "function", "function": {"name": "web_search",  ...}},
+#   {"type": "function", "function": {"name": "send_email", ...}}
+# ]
+
+response = get_client().chat.completions.create(
+    model="deepseek-chat",
+    messages=[...],
+    tools=schema,   # ← 原生 function calling
+)
+# 处理 response.choices[0].message.tool_calls
+`
+
+> **注意**：内部 ReAct 循环采用**文本 JSON 范式**（get_tools_text_description + parse_action），不传 	ools= 参数。上述 API 仅供外部框架（如 LangChain、Custom Orchestration）自行桥接 function calling 使用。
 
 ## 技术栈
 
