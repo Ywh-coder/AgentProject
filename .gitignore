@@ -33,3 +33,6 @@ env/
 .DS_Store
 Thumbs.db
 traces/
+ans_check.txt
+kw_check.txt
+temp/
