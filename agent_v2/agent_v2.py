@@ -294,7 +294,6 @@ def truncate_messages(messages: List[Dict[str, str]], max_tokens: int = 3000) ->
 
     turns, orphaned = _group_turns(messages)
     # Estimate token cost of orphaned messages
-    orphan_tokens = sum(count_tokens(m.get("content", "")) for m in orphaned)
     # Keep at least 20% buffer in case estimates are off
     safe_limit = int(max_tokens * 0.8)
 
@@ -315,18 +314,16 @@ def truncate_messages(messages: List[Dict[str, str]], max_tokens: int = 3000) ->
     return result
 # ---------- LLM 调用 ----------
 # ---------- LLM Call with timeout and retry ----------
-def call_llm(messages: List[Dict[str, str]], temperature: float = 0.0, max_retries: int = 3) -> Optional[str]:
+def call_llm(messages: List[Dict[str, str]], temperature: float = 0.0, max_retries: int = 3, tools: Optional[List[Dict]] = None) -> Optional[str]:
     NON_RETRYABLE = (AuthenticationError, BadRequestError)
     last_err: Optional[Exception] = None
 
     for attempt in range(max_retries):
         try:
-            response = get_client().chat.completions.create(
-                model="deepseek-chat",
-                messages=messages,
-                temperature=temperature,
-                timeout=30.0,
-            )
+            kwargs: Dict = dict(model="deepseek-chat", messages=messages, temperature=temperature, timeout=30.0)
+            if tools:
+                kwargs["tools"] = tools
+            response = get_client().chat.completions.create(**kwargs)
             return response.choices[0].message.content
         except NON_RETRYABLE as e:
             logger.error(f"LLM non-retryable error: {e}")
@@ -402,6 +399,7 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
     step_start_global = time.time()
     tools_desc = registry.get_tools_text_description()
     system_prompt = build_system_prompt(tools_desc)
+    tools_schema = registry.get_tools_json_schema()
     messages = [
         {"role": "system", "content": system_prompt},
     ]
@@ -412,7 +410,7 @@ def react_agent(user_query: str, max_steps: int = 5, max_parse_retries: int = 3,
         step_start = time.time()
         if verbose:
             logger.info(f"--- Step {step+1} ---")
-        response = call_llm(messages)
+        response = call_llm(messages, tools=tools_schema)
         if not response:
             trace["error"] = "LLM call failed"
             trace["total_latency_ms"] = int((time.time() - step_start_global) * 1000)
